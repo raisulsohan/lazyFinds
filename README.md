@@ -24,7 +24,17 @@ Inspired by DigUp for macOS; written from scratch for Windows.
 - For Bengali text in pictures and scans (optional): Tesseract OCR (`winget install UB-Mannheim.TesseractOCR`);
   Settings → "Set up…" fetches its Bengali and English models
 
-## Install and run
+## Install
+
+Download `lazyFinds-Setup-<version>.exe` from [Releases](https://github.com/raisulsohan/lazyFinds/releases) and run
+it. It installs for your user only (no admin rights) into `%LOCALAPPDATA%\Programs\lazyFinds`, with a Start menu
+entry, and can start lazyFinds when you sign in. The installer isn't code-signed yet, so Windows SmartScreen may ask
+first: choose "More info" → "Run anyway".
+
+Uninstall from Settings → Apps. It asks whether to delete the downloaded model and the index too; your own files are
+never touched.
+
+## Run from source
 
 ```powershell
 git clone <this repo> lazyFinds
@@ -122,6 +132,12 @@ uv run pytest
 uv run python scripts/make_testbed.py C:\tmp\testbed     # test files from Windows' own fonts, voices and wallpaper
 $env:LAZYFINDS_INDEX = "C:\tmp\test.sqlite"; uv run lazyfinds index C:\tmp\testbed; uv run python scripts/eval.py
 cd tools\reference; uv run python make_reference.py C:\tmp\testbed ..\..\tests\reference   # official vectors (CPU)
+```
+
+Build the installer (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging/build.ps1   # → packaging/Output/lazyFinds-Setup-<version>.exe
 ```
 
 `LAZYFINDS_HOME` moves all of lazyFinds' files; `LAZYFINDS_INDEX` and `LAZYFINDS_CODE_INDEX` move only the indexes.

@@ -1170,6 +1170,10 @@ def main() -> int:
     qt.setWindowIcon(make_icon())
     # One lazyFinds at a time: a second start shows the first one's panel.
     name = f"lazyFinds-{os.environ.get('USERNAME', 'user')}"
+    if os.environ.get("LAZYFINDS_HOME"):   # a separate test setup runs beside the real one
+        import hashlib
+
+        name += "-" + hashlib.sha1(os.environ["LAZYFINDS_HOME"].lower().encode()).hexdigest()[:8]
     probe = QLocalSocket()
     probe.connectToServer(name)
     if probe.waitForConnected(300):

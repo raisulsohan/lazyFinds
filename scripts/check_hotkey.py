@@ -1,7 +1,7 @@
 """Checks the real path a person takes: start the app, press its hotkey (SendInput), see the panel come up; start it a
 second time and see the first one answer. Uses LAZYFINDS_HOME / LAZYFINDS_INDEX like the app does.
 
-    uv run python scripts/check_hotkey.py
+    uv run python scripts/check_hotkey.py [dist/lazyFinds/lazyFinds.exe]   # the built app instead of the source
 """
 
 from __future__ import annotations
@@ -46,7 +46,8 @@ def press(hotkey: str):
 
 def main() -> int:
     hotkey = Settings.load().hotkey
-    app = subprocess.Popen([sys.executable, "-m", "lazyfinds.app"], env=os.environ.copy())
+    command = sys.argv[1:2] or [sys.executable, "-m", "lazyfinds.app"]
+    app = subprocess.Popen(command, env=os.environ.copy())
     ok = True
     try:
         time.sleep(6)
@@ -62,7 +63,7 @@ def main() -> int:
         user32.keybd_event(0x1B, 0, 2, 0)   # Esc
         time.sleep(1)
         print("after Esc: panel visible:", panel_visible())
-        second = subprocess.run([sys.executable, "-m", "lazyfinds.app"], env=os.environ.copy(), timeout=20)
+        second = subprocess.run(command, env=os.environ.copy(), timeout=20)
         time.sleep(1.5)
         shown = panel_visible()
         print("second start exited with", second.returncode, "and the first one's panel is visible:", shown)

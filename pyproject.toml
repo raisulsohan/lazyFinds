@@ -38,4 +38,7 @@ build-backend = "hatchling.build"
 packages = ["src/lazyfinds"]
 
 [dependency-groups]
-dev = ["pytest>=8.4"]
+dev = [
+    "pyinstaller>=6.16",
+    "pytest>=8.4",
+]

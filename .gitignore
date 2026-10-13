@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 /dist/
 /build/
+/dist/
+/build/
+/packaging/Output/
