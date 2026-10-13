@@ -149,6 +149,9 @@ class IndexService:
             again = store.read_again(CUT_SHORT)
             if again:
                 log.info("reading %d files again that a quit cut short", again)
+            again = store.read_type_again("read again: docx pictures", ".docx")   # up to 0.1.5 only words were read
+            if again:
+                log.info("reading %d Word files again for their pictures", again)
             if paths.ffmpeg_ready():
                 again = store.read_again(X.FFMPEG_MISSING)
                 if again:

@@ -154,7 +154,11 @@ def cmd_search(args) -> int:
             say("  — weaker matches —")
         place = ""
         if h.start is not None:
-            if h.kind in ("audio", "video"):
+            if h.part == "inner_picture":
+                place = f" picture {int(h.start)}" + (f" on slide {int(h.stop)}" if h.stop else "")
+            elif h.part == "slide":
+                place = f" slide {int(h.start)}"
+            elif h.kind in ("audio", "video"):
                 place = f" @ {int(h.start // 60)}:{int(h.start % 60):02d}"
             elif h.kind == "pdf":
                 place = f" p.{int(h.start)}"

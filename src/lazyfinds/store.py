@@ -38,10 +38,11 @@ CREATE INDEX IF NOT EXISTS files_status ON files(status);
 CREATE TABLE IF NOT EXISTS pieces(
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-    part TEXT NOT NULL,          -- name | picture | screen_text | page | page_picture | passage | sound | scene | code
+    part TEXT NOT NULL,          -- name | picture | screen_text | page | page_picture | passage | slide | inner_picture
+                                 -- | sound | scene | code
     source TEXT,                 -- what made the vector: text | image | audio (NULL: no vector)
-    start REAL,                  -- page, passage number, second, or line
-    stop REAL,
+    start REAL,                  -- page, passage or slide number, second, line, or a picture's number in its document
+    stop REAL,                   -- end second, or the slide a picture in a presentation is on
     line TEXT,                   -- what the results list shows
     body TEXT,                   -- the words as written
     vector BLOB
@@ -183,6 +184,20 @@ class Store:
         with self.lock:
             return self.db.execute("UPDATE files SET status = 'new', note = NULL WHERE status = 'failed' AND "
                                    "instr(note, ?) > 0", (note_part,)).rowcount
+
+    def read_type_again(self, key: str, suffix: str) -> int:
+        """Once per index (`key` records it), reads every `suffix` file again: its reader now finds more in it."""
+        if self.get(key):
+            return 0
+        with self.transaction():
+            ids = [r[0] for r in self.db.execute("SELECT id FROM files WHERE status != 'new' AND path LIKE ?",
+                                                 ("%" + suffix,))]
+            for file_id in ids:
+                self._drop_pieces(file_id, keep_name=True)
+            self.db.executemany("UPDATE files SET status = 'new', note = NULL, meta = NULL WHERE id = ?",
+                                [(i,) for i in ids])
+            self.db.execute("INSERT OR REPLACE INTO info VALUES(?, '1')", (key,))
+        return len(ids)
 
     def counts(self) -> dict:
         kinds = dict(self.db.execute("SELECT kind, COUNT(*) FROM files GROUP BY kind"))

@@ -14,6 +14,7 @@ import base64
 import html.parser
 import io
 import json
+import posixpath
 import re
 import subprocess
 import zipfile
@@ -44,6 +45,7 @@ SMALLEST_PICTURE = 100_000 # pixels: icons, thumbnails and buttons are below thi
 PAGE_WORDS = 25            # a page with fewer words in its text layer is read as a picture (a scan, a slide)
 MAX_PAGES = 3000
 MAX_PASSAGES = 4000
+MAX_INNER_PICTURES = 300   # pictures read from one Word or PowerPoint file
 SOUND_WINDOW = 20.0        # seconds of sound per vector (the model hears at most 30)
 SOUND_STEP = 15.0          # windows overlap by 5 s, so a sentence on a boundary is whole in one
 QUIET = 0.004              # RMS below this is silence
@@ -62,10 +64,11 @@ class Unreadable(Exception):
 
 @dataclass
 class Piece:
-    part: str                     # picture | screen_text | page | page_picture | passage | sound | scene
+    part: str                     # picture | screen_text | page | page_picture | passage | slide | inner_picture
+                                  # | sound | scene
     source: str | None = None     # text | image | audio: what the vector is made from
-    start: float | None = None
-    stop: float | None = None
+    start: float | None = None    # an inner picture: its number among the document's pictures
+    stop: float | None = None     # an inner picture: the slide it's on
     line: str | None = None
     body: str | None = None
     embed: tuple | None = None    # ("text", prompt) or ("media", base64)
@@ -82,7 +85,7 @@ class Reading:
 # -- pictures
 
 
-def open_picture(path: Path) -> Image.Image:
+def open_picture(path: Path | io.BytesIO) -> Image.Image:
     try:
         image = Image.open(path)
         image.seek(0)                      # the first frame of a GIF or a multi-page TIFF
@@ -241,11 +244,161 @@ def _xml_paragraphs(xml: str, paragraph_end: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", "", xml))
 
 
+# Word and PowerPoint files are zips of XML. A picture in one is a file in the zip (word/media/image3.png), placed by
+# an element that names it through the part's relationships (r:embed="rId7" -> media/image3.png) and holds its alt
+# text (descr="..."). Each picture is read like a photo; its alt text is read as words where the picture stands.
+
+INNER_TYPES = {".png", ".jpg", ".jpeg", ".jfif", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".emf", ".wmf"}
+_PLACED = re.compile(r"<(w:drawing|w:pict|p:pic|p:sp)\b.*?</\1>", re.S)   # what can show a picture
+_ALT_OR_PICTURE = re.compile(r'\b(?:descr|alt|title)="([^"]+)"|\br:(?:embed|id)="([^"]+)"')
+# What Office writes after alt text it made up itself
+_MADE_UP = re.compile(r"\s*(?:Description automatically generated|AI-generated content may be incorrect).*$",
+                      re.S | re.I)
+_ENDS = "</w:p></a:p>"
+
+
+@dataclass
+class InnerPicture:
+    member: str                   # the picture's file in the zip
+    alt: str | None = None
+    slide: int | None = None
+
+
+def _relations(z: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:
+    """A part's relationships: id -> (type, the zip member it points at). Links out of the file are left out."""
+    folder, name = part.rsplit("/", 1)
+    try:
+        xml = z.read(f"{folder}/_rels/{name}.rels").decode("utf-8", "replace")
+    except KeyError:
+        return {}
+    out = {}
+    for tag in re.findall(r"<Relationship\b[^>]*>", xml):
+        a = dict(re.findall(r'(\w+)="([^"]*)"', tag))
+        if "Id" not in a or a.get("TargetMode") == "External":
+            continue
+        target = html.unescape(a.get("Target", ""))
+        member = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join(folder, target))
+        out[a["Id"]] = (a.get("Type", ""), member)
+    return out
+
+
+def _alt_text(raw: str) -> str | None:
+    return _MADE_UP.sub("", html.unescape(raw)).strip() or None
+
+
+def _with_alt_text(xml: str, relations: dict, found: list[InnerPicture], slide: int | None = None) -> str:
+    """`xml` with the alt text of each picture written after it as text; the pictures added to `found`."""
+
+    def one(m: re.Match) -> str:
+        alt, alts = None, []
+        for a in _ALT_OR_PICTURE.finditer(m.group(0)):
+            if a.group(1):
+                alt = alt or _alt_text(a.group(1))   # alt text comes before the picture it describes; descr first
+                continue
+            member = relations.get(a.group(2), ("", ""))[1]
+            if posixpath.splitext(member)[1].lower() in INNER_TYPES:
+                found.append(InnerPicture(member, alt, slide))
+                if alt and alt not in alts:
+                    alts.append(alt)
+                alt = None
+        # A paragraph end in either format, so each alt text is a line of its own
+        return m.group(0) + "".join(f"{_ENDS}{html.escape(a, quote=False)}{_ENDS}" for a in alts)
+
+    # Office writes a second copy of each drawing for old readers (mc:Fallback): read the first only
+    return _PLACED.sub(one, re.sub(r"<mc:Fallback\b.*?</mc:Fallback>", "", xml, flags=re.S))
+
+
+def _docx(z: zipfile.ZipFile) -> tuple[str, list[InnerPicture]]:
+    """The text, and the pictures of the body (not the logo in the header)."""
+    parts = [n for n in z.namelist() if re.fullmatch(r"word/(document|header\d*|footer\d*|footnotes)\.xml", n)]
+    parts.sort(key=lambda n: n != "word/document.xml")
+    pictures: list[InnerPicture] = []
+    texts = []
+    for n in parts:
+        xml = z.read(n).decode("utf-8", "replace")
+        if n == "word/document.xml":
+            xml = _with_alt_text(xml, _relations(z, n), pictures)
+        texts.append(_xml_paragraphs(xml, "</w:p>"))
+    return "\n".join(texts), pictures
+
+
 def docx_text(path: Path) -> str:
     with zipfile.ZipFile(path) as z:
-        parts = [n for n in z.namelist() if re.fullmatch(r"word/(document|header\d*|footer\d*|footnotes)\.xml", n)]
-        parts.sort(key=lambda n: n != "word/document.xml")
-        return "\n".join(_xml_paragraphs(z.read(n).decode("utf-8", "replace"), "</w:p>") for n in parts)
+        return _docx(z)[0]
+
+
+def _slide_text(xml: str) -> str:
+    xml = re.sub(r"<a:fld\b.*?</a:fld>", "", xml, flags=re.S)   # slide numbers and dates
+    xml = re.sub(r"<a:br\b", "\n<a:br", xml)
+    return _xml_paragraphs(xml, "</a:p>").strip()
+
+
+def _pptx(z: zipfile.ZipFile) -> tuple[list[tuple[int, str]], list[InnerPicture]]:
+    """Each slide's text (with its speaker notes) in the order the presentation shows them, and their pictures."""
+    relations = _relations(z, "ppt/presentation.xml")
+    order = re.findall(r'<p:sldId\b[^>]*?\br:id="([^"]+)"', z.read("ppt/presentation.xml").decode("utf-8", "replace"))
+    slides: list[tuple[int, str]] = []
+    pictures: list[InnerPicture] = []
+    for number, rid in enumerate(order, 1):
+        member = relations.get(rid, ("", ""))[1]
+        try:
+            xml = z.read(member).decode("utf-8", "replace")
+        except KeyError:
+            continue
+        own = _relations(z, member)
+        texts = [_slide_text(_with_alt_text(xml, own, pictures, number))]
+        for kind, target in own.values():
+            if kind.endswith("/notesSlide"):
+                try:
+                    texts.append(_slide_text(z.read(target).decode("utf-8", "replace")))
+                except KeyError:
+                    pass
+        slides.append((number, "\n".join(t for t in texts if t)))
+    return slides, pictures
+
+
+def _unique(pictures: list[InnerPicture]) -> list[InnerPicture]:
+    """One of each picture file (a logo on every slide is read once), where it first shows."""
+    seen: dict[str, InnerPicture] = {}
+    for p in pictures:
+        if p.member not in seen:
+            seen[p.member] = p
+        elif not seen[p.member].alt:
+            seen[p.member].alt = p.alt
+    return list(seen.values())
+
+
+def _inner_pictures(z: zipfile.ZipFile, ext: str) -> list[InnerPicture]:
+    return _unique(_docx(z)[1] if ext == ".docx" else _pptx(z)[1])
+
+
+def _read_inner(z: zipfile.ZipFile, pictures: list[InnerPicture]) -> list[Piece]:
+    out: list[Piece] = []
+    for number, p in enumerate(_unique(pictures), 1):
+        if len(out) >= MAX_INNER_PICTURES:
+            break
+        try:
+            picture = open_picture(io.BytesIO(z.read(p.member)))
+        except (Unreadable, KeyError):
+            continue
+        if picture.width * picture.height < SMALLEST_PICTURE:   # icons, bullets, logos
+            continue
+        try:
+            payload = E.image_payload(picture, PICTURE_TOKENS)
+        except ValueError:   # a thin strip: a divider line, a banner
+            continue
+        seen = ocr.text_of(picture)
+        out.append(Piece("inner_picture", "image", start=number, stop=p.slide,
+                         line=p.alt or (T.preview(seen) if seen else None),
+                         body="\n".join(t for t in (p.alt, seen) if t) or None, embed=("media", payload)))
+    return out
+
+
+def inner_picture(path: Path, number: int) -> Image.Image:
+    """Picture `number` of a Word or PowerPoint file, as its inner_picture piece counts them."""
+    with zipfile.ZipFile(path) as z:
+        pictures = _inner_pictures(z, path.suffix.lower())
+        return open_picture(io.BytesIO(z.read(pictures[number - 1].member)))
 
 
 def odt_text(path: Path) -> str:
@@ -293,9 +446,17 @@ def rtf_text(source: str) -> str:
 
 def read_document(path: Path) -> Reading:
     ext = path.suffix.lower()
+    slides: list[tuple[int, str]] | None = None
+    pictures: list[Piece] = []
     try:
-        if ext == ".docx":
-            text = docx_text(path)
+        if ext in (".docx", ".pptx"):
+            with zipfile.ZipFile(path) as z:
+                if ext == ".docx":
+                    text, inner = _docx(z)
+                else:
+                    slides, inner = _pptx(z)
+                    text = "\n".join(t for _, t in slides)
+                pictures = _read_inner(z, inner)
         elif ext == ".odt":
             text = odt_text(path)
         elif ext == ".rtf":
@@ -306,13 +467,21 @@ def read_document(path: Path) -> Reading:
             text = decode(path.read_bytes())
     except (zipfile.BadZipFile, KeyError) as error:
         raise Unreadable(f"can't read the document ({error})")
-    passages = T.passages(text, limit=MAX_PASSAGES)
-    if not passages:
+    if slides is None:
+        passages = [(number, "passage", p) for number, p in enumerate(T.passages(text, limit=MAX_PASSAGES), 1)]
+    else:   # a slide's place is its number
+        passages = [(number, "slide", p) for number, t in slides for p in T.passages(t)][:MAX_PASSAGES]
+    if not passages and not pictures:
         raise Skip("no text")
     reading = Reading(meta={"passages": len(passages), "characters": len(text)})
-    for number, passage in enumerate(passages, 1):
+    if slides is not None:
+        reading.meta["slides"] = len(slides)
+    if pictures:
+        reading.meta["pictures"] = len(pictures)
+    for number, part, passage in passages:
         embed = ("text", E.document_prompt(path.stem, passage)) if T.mostly_words(passage) else None
-        reading.pieces.append(Piece("passage", "text", start=number, line=T.preview(passage), body=passage, embed=embed))
+        reading.pieces.append(Piece(part, "text", start=number, line=T.preview(passage), body=passage, embed=embed))
+    reading.pieces.extend(pictures)
     return reading
 
 
@@ -466,10 +635,14 @@ def read(path: Path, kind: str) -> Reading:
     raise Skip(f"no reader for {kind}")
 
 
-def thumbnail(path: Path, kind: str, place: float | None, size: int = 320) -> Image.Image | None:
-    """A small picture for the results list and the preview: the picture, the PDF page, or the video's frame there."""
+def thumbnail(path: Path, kind: str, place: float | None, size: int = 320,
+              part: str | None = None) -> Image.Image | None:
+    """A small picture for the results list and the preview: the picture, the PDF page, the video's frame there, or
+    the picture inside a document."""
     try:
-        if kind in ("image", "screenshot"):
+        if part == "inner_picture":
+            image = inner_picture(path, int(place or 1))
+        elif kind in ("image", "screenshot"):
             image = open_picture(path)
         elif kind == "pdf":
             import pypdfium2 as pdfium

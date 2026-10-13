@@ -87,6 +87,10 @@ def fmt_time(seconds: float) -> str:
 def place_of(hit: Hit) -> str:
     if hit.start is None:
         return ""
+    if hit.part == "inner_picture":
+        return f"picture on slide {int(hit.stop)}" if hit.stop else "picture"
+    if hit.part == "slide":
+        return f"slide {int(hit.start)}"
     if hit.kind in ("audio", "video"):
         return f"at {fmt_time(hit.start)}"
     if hit.kind == "pdf":
@@ -503,7 +507,7 @@ class SearchPanel(QWidget):
             self.rows.setdefault(key, []).append(row)
             if key in self.thumbs:
                 row.set_thumb(self.thumbs[key])
-            elif hit.kind in ("image", "screenshot", "pdf", "video"):
+            elif hit.kind in ("image", "screenshot", "pdf", "video") or hit.part == "inner_picture":
                 self.app.load_thumb(key, hit)
         # Once you've moved to a result, it stays selected when meaning results arrive; otherwise the top one is.
         target = 0
@@ -522,6 +526,8 @@ class SearchPanel(QWidget):
 
     @staticmethod
     def _thumb_key(hit: Hit) -> str:
+        if hit.part == "inner_picture":
+            return f"{hit.path}|picture {int(hit.start)}"
         loc = int(hit.start) if hit.start is not None and hit.kind in ("pdf", "video") else 0
         return f"{hit.path}|{loc}"
 
@@ -756,8 +762,8 @@ class Preview(QWidget):
         self.page_label.setText("")
         app = C.editor_name() if hit.kind == "code" else opener.default_app_name(Path(hit.path).suffix.lower())
         self.open_button.setText(f"Open in {app}" if app and app.lower() != "openwith" else "Open")
-        if hit.kind in ("image", "screenshot", "pdf"):
-            image = extract.thumbnail(Path(hit.path), hit.kind, hit.start, size=700)
+        if hit.kind in ("image", "screenshot", "pdf") or hit.part == "inner_picture":
+            image = extract.thumbnail(Path(hit.path), hit.kind, hit.start, size=700, part=hit.part)
             if image is not None:
                 self.page_image = pil_to_qimage(image)
                 self.picture.show()
@@ -1429,7 +1435,7 @@ class LazyFindsApp(QObject):
 
     def load_thumb(self, key: str, hit: Hit):
         def work():
-            image = extract.thumbnail(Path(hit.path), hit.kind, hit.start, size=96)
+            image = extract.thumbnail(Path(hit.path), hit.kind, hit.start, size=96, part=hit.part)
             if image is not None:
                 self.bridge.thumb.emit(key, pil_to_qimage(image))
 
