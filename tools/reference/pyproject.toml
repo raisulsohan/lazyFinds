@@ -1,0 +1,18 @@
+[project]
+name = "lazyfinds-reference"
+version = "0.1.0"
+description = "Makes lazyFinds' reference vectors with Google's official EmbeddingGemma 2 (sentence-transformers, CPU). Not part of the app."
+requires-python = ">=3.12"
+dependencies = ["torch>=2.8", "torchvision>=0.23", "sentence-transformers>=5.1", "transformers>=4.57", "pillow>=11", "soundfile>=0.13", "numpy>=2"]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
