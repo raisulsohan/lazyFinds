@@ -137,8 +137,14 @@ def cmd_search(args) -> int:
             vector = engine.embed_texts([E.code_query_prompt(code_query)])[0]
             hits = C.search(searcher, code_query, vector, limit=args.limit)
         else:
-            vector = engine.embed_query(query)
-            hits = searcher.search(query, vector, kinds=set(args.kind) if args.kind else None, limit=args.limit)
+            from . import banglish as B
+
+            conversion = None if args.as_typed or not Settings.load().banglish else B.convert(query)
+            vector = engine.embed_query(conversion.text if conversion else query)
+            hits = searcher.search(query, vector, kinds=set(args.kind) if args.kind else None, limit=args.limit,
+                                   also=conversion)
+            if conversion:
+                say(f"also searched: {conversion.shown}  (--as-typed searches only as typed)")
         took = time.time() - t
     strong = strong_count(hits)
     say(f"{len(hits)} results ({strong} strong) in {took * 1000:.0f} ms; model on {engine.backend}, "
@@ -217,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--lines", action="store_true", help="show each result's line")
     p.add_argument("--backend", choices=list(E.BACKENDS))
+    p.add_argument("--as-typed", action="store_true", help="don't search Banglish words in Bengali")
     p.set_defaults(run=cmd_search)
     p = sub.add_parser("status", help="what's in the index")
     p.add_argument("--problems", action="store_true", help="list skipped and unreadable files")

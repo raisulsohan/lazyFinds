@@ -2,7 +2,8 @@
 
 Ctrl+Shift+Space (changeable) opens the panel from any app. Type what you're looking for: words match at once, meaning
 follows a moment later. Enter opens the result where it matched, Space previews it, Ctrl+Enter shows it in File
-Explorer, Ctrl+C copies the file.
+Explorer, Ctrl+C copies the file. Bengali typed in Latin letters is searched in Bengali too; a line under the field
+says so, and Ctrl+B searches that query as typed.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFil
                                QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton,
                                QSizePolicy, QSlider, QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget)
 
+from . import banglish as B
 from . import code as C
 from . import extract, opener, paths, rules
 from . import text as T
@@ -119,7 +121,7 @@ def parse_hotkey(text: str) -> tuple[int, int] | None:
 
 class Bridge(QObject):
     """Signals from the worker threads, delivered on the UI thread."""
-    results = Signal(int, str, object, bool)
+    results = Signal(int, str, object, bool, str)   # seq, query, hits, final, its Bengali form ("" for none)
     name_status = Signal(str)
     status = Signal(object)
     thumb = Signal(str, QImage)
@@ -265,6 +267,7 @@ QLabel#sub { color: rgba(128,128,128,0.95); font-size: 12px; }
 QLabel#excerpt { color: palette(text); font-size: 12px; }
 QLabel#thumb { background: rgba(128,128,128,0.12); border-radius: 6px; font-size: 22px; }
 QLabel#footer, QLabel#section { color: rgba(128,128,128,0.95); font-size: 11px; padding: 2px 14px; }
+QLabel#also { color: rgba(128,128,128,0.95); font-size: 12px; padding: 0 14px 2px 14px; }
 QPushButton#chip { border: 1px solid rgba(128,128,128,0.35); border-radius: 11px; padding: 2px 10px; font-size: 12px; }
 QPushButton#chip:checked { background: rgba(79,140,255,0.25); border-color: rgba(79,140,255,0.8); }
 """
@@ -293,6 +296,14 @@ class SearchPanel(QWidget):
         self.query.textChanged.connect(self._typed)
         self.query.installEventFilter(self)
         box.addWidget(self.query)
+        # "also searched: আতশবাজি" when a Banglish query was searched in Bengali; a click or Ctrl+B searches it as typed.
+        self.also = QLabel()
+        self.also.setObjectName("also")
+        self.also.setTextFormat(Qt.TextFormat.RichText)
+        self.also.linkActivated.connect(lambda _: self.toggle_banglish())
+        self.also.hide()
+        box.addWidget(self.also)
+        self.as_typed: str | None = None   # the query to search only as typed
         chips = QHBoxLayout()
         chips.setContentsMargins(10, 0, 10, 4)
         chips.setSpacing(0)
@@ -426,16 +437,42 @@ class SearchPanel(QWidget):
         self.kinds = kinds
         self._submit()
 
+    def _banglish(self) -> str:
+        """How this query treats Banglish: "on", "typed" (turned off for it) or "off" (turned off in Settings)."""
+        if not Settings.load().banglish:
+            return "off"
+        return "typed" if self.as_typed == self.query.text().strip() else "on"
+
+    def toggle_banglish(self):
+        """Searches the query as typed, or in Bengali again."""
+        if not self.also.isVisible():
+            return
+        text = self.query.text().strip()
+        self.as_typed = None if self.as_typed == text else text
+        self._submit()
+
     def _submit(self):
         self.seq += 1
         if self.mode == "name":
-            self.app.find_names(self.seq, self.query.text(), self.kinds)
+            self.app.find_names(self.seq, self.query.text(), self.kinds, self._banglish())
         else:
-            self.app.query.submit(self.seq, self.query.text(), self.kinds)
+            self.app.query.submit(self.seq, self.query.text(), self.kinds, self._banglish())
 
-    def show_results(self, seq: int, text: str, hits: list[Hit], final: bool):
+    def _show_also(self, also: str):
+        if not also:
+            self.also.hide()
+            return
+        shown = html.escape(also)
+        if self._banglish() == "typed":
+            self.also.setText(f"searched as typed · <a href='on'>also search <b>{shown}</b></a> (Ctrl+B)")
+        else:
+            self.also.setText(f"also searched: <b>{shown}</b> · <a href='typed'>search only as typed</a> (Ctrl+B)")
+        self.also.show()
+
+    def show_results(self, seq: int, text: str, hits: list[Hit], final: bool, also: str = ""):
         if seq != self.seq:
             return
+        self._show_also(also)
         current = self.current_hit()
         self.list.clear()
         self.rows.clear()
@@ -576,6 +613,9 @@ class SearchPanel(QWidget):
                 return True
             if ctrl and key == Qt.Key.Key_C and not self.query.hasSelectedText():
                 self.copy_current()
+                return True
+            if ctrl and key == Qt.Key.Key_B:
+                self.toggle_banglish()
                 return True
             if ctrl and key == Qt.Key.Key_Comma:
                 self.app.show_settings()
@@ -935,6 +975,10 @@ class SettingsWindow(QWidget):
                                      "never what's inside)")
         self.name_search.toggled.connect(lambda on: self._save(lambda s: setattr(s, "name_search", on)))
         layout.addWidget(self.name_search)
+        self.banglish = QCheckBox("Search Bengali typed in English letters in Bengali too (\"atoshbaji\" finds "
+                                  "আতশবাজি)")
+        self.banglish.toggled.connect(lambda on: self._save(lambda s: setattr(s, "banglish", on)))
+        layout.addWidget(self.banglish)
         self.startup = QCheckBox("Start lazyFinds when I sign in to Windows")
         self.startup.toggled.connect(self._startup)
         layout.addWidget(self.startup)
@@ -972,6 +1016,9 @@ class SettingsWindow(QWidget):
         self.name_search.blockSignals(True)
         self.name_search.setChecked(s.name_search)
         self.name_search.blockSignals(False)
+        self.banglish.blockSignals(True)
+        self.banglish.setChecked(s.banglish)
+        self.banglish.blockSignals(False)
         self.startup.blockSignals(True)
         self.startup.setChecked(startup_enabled())
         self.startup.blockSignals(False)
@@ -1345,17 +1392,22 @@ class LazyFindsApp(QObject):
         if self.panel.isVisible() and self.panel.mode == "name":
             self.panel.update_footer()
 
-    def find_names(self, seq: int, text: str, kinds):
-        """Name search off the UI thread; the answer comes back as ordinary results."""
+    def find_names(self, seq: int, text: str, kinds, banglish: str = "on"):
+        """Name search off the UI thread; the answer comes back as ordinary results. A Banglish query also finds names
+        written in Bengali ("kemon" → কেমন আছো.docx)."""
         def work():
             if seq != self.panel.seq:   # a newer query was typed meanwhile
                 return
             if not text.strip():
-                self.bridge.results.emit(seq, text, [], True)
+                self.bridge.results.emit(seq, text, [], True, "")
                 return
+            conversion = B.convert(text) if banglish != "off" else None
+            also = B.name_queries(text, conversion) if conversion and banglish == "on" else ()
             found = self.names.names.search(text, folders_only=kinds == "folders",
-                                            extensions=kinds if isinstance(kinds, (set, frozenset)) else None)
-            self.bridge.results.emit(seq, text, [name_hit(f) for f in found], True)
+                                            extensions=kinds if isinstance(kinds, (set, frozenset)) else None,
+                                            also=also)
+            self.bridge.results.emit(seq, text, [name_hit(f) for f in found], True,
+                                     conversion.shown if conversion else "")
 
         self.name_pool.submit(work)
 

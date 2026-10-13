@@ -8,6 +8,12 @@ at MEANING_GATE or more. A file takes its best piece.
 Words. SQLite FTS5 over file names, folder names, document and page text and the words in pictures. A file whose
 pieces hold every query word matches fully; one that holds most of a longer query, partly.
 
+Banglish. A query with Bengali typed in Latin letters ("atoshbaji", see banglish.py) is searched in its Bengali form:
+its meaning is the Bengali form's (English words in it stay as typed), and each Banglish word matches as itself or any
+of its likely Bengali spellings. The meaning of the query as typed isn't used: the model reads "jonmodiner cake" as a
+cake recipe as much as a birthday, and keeping each file's better score of the two forms put 8 of 32 Banglish test
+queries below another file, against 3 with the Bengali form alone.
+
 Fusion. Reciprocal rank fusion of the two rankings (Cormack, Clarke & Büttcher, 2009): a file near the top of both
 comes first. Before that, two tiers: files holding every code or ID the query has ("TXN-58K3Q", "881275") come
 first, and files of the kind the query names ("…in a video") come before files of other kinds.
@@ -21,6 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import text as T
+from .banglish import Conversion
 from .store import Store
 
 MEANING_GATE = 3.0     # robust deviations above the median of its kind
@@ -110,14 +117,18 @@ class Searcher:
 
     # -- words
 
-    def _words(self, terms: list[str], typing: bool, allowed) -> dict[int, tuple[float, float, int]]:
-        """file -> (share of the terms it holds, its best bm25, the piece that matched best)."""
+    def _words(self, terms: list[str], typing: bool, allowed,
+               spellings: dict[str, list[str]] | None = None) -> dict[int, tuple[float, float, int]]:
+        """file -> (share of the terms it holds, its best bm25, the piece that matched best). A term with Bengali
+        `spellings` matches as itself or any of them."""
         if not terms:
             return {}
         held: dict[int, set[int]] = {}
         best: dict[int, tuple[float, int, bool]] = {}
         for i, term in enumerate(terms):
             fts = T.fts_term(term, typing and i == len(terms) - 1)
+            if spellings and term in spellings:
+                fts = " OR ".join([fts] + [T.fts_term(s) for s in spellings[term]])
             try:
                 rows = self.store.db.execute(
                     "SELECT p.file_id, p.id, bm25(words, 5.0, 1.0), p.part FROM words "
@@ -138,7 +149,8 @@ class Searcher:
     # -- both
 
     def search(self, query: str, vector=None, kinds: set[str] | None = None, limit: int = 40,
-               typing: bool = False) -> list[Hit]:
+               typing: bool = False, also: Conversion | None = None) -> list[Hit]:
+        """`also`: the query's Banglish words and their Bengali spellings; then `vector` is the Bengali form's."""
         if self._seen is None:
             self.load()
 
@@ -146,10 +158,23 @@ class Searcher:
             return kinds is None or self.kind.get(f) in kinds
 
         terms = T.query_terms(query)
-        codes = [t for t in terms if T.is_code_like(t)]
         asked = T.kinds_asked(query)
+        spellings: dict[str, list[str]] = {}
+        if also:
+            # A Banglish word that is a Bengali stopword ("theke" থেকে) or names a kind of file ("chobi" ছবি) is
+            # left out, as it would be in Bengali.
+            for term in list(terms):
+                forms = also.words.get(term)
+                if not forms:
+                    continue
+                if forms[0] in T.BENGALI_STOP or forms[0] in T.KIND_WORDS:
+                    terms.remove(term)
+                    asked |= T.kinds_asked(forms[0])
+                else:
+                    spellings[term] = forms
+        codes = [t for t in terms if T.is_code_like(t)]
         meaning = self._meaning(vector, allowed)
-        words = self._words(terms, typing, allowed)
+        words = self._words(terms, typing, allowed, spellings)
 
         enough = 1.0 if len(terms) < 3 else 0.66
         by_meaning = sorted((f for f, (s, _) in meaning.items() if s >= MEANING_GATE), key=lambda f: -meaning[f][0])
@@ -171,7 +196,8 @@ class Searcher:
             return (holds_codes, self.kind.get(f) in asked, fused, meaning.get(f, (0,))[0])
 
         ranked = sorted(candidates, key=order, reverse=True)[:limit]
-        return [self._hit(f, order(f)[2], meaning.get(f), words.get(f), f in rank_m, terms) for f in ranked]
+        marked = terms + [s for forms in spellings.values() for s in forms]
+        return [self._hit(f, order(f)[2], meaning.get(f), words.get(f), f in rank_m, marked) for f in ranked]
 
     def _hit(self, f: int, score: float, meaning, words, by_meaning: bool, terms: list[str]) -> Hit:
         db = self.store.db

@@ -8,6 +8,8 @@ English or Bengali, and lazyFinds finds it. Everything runs on your PC: no accou
 - "how volcanoes form" plays the recording from that moment
 - "fireworks at night" plays the video from the shot with the fireworks
 - "বিদ্যুৎ বিল" finds the Bengali payment screenshot; "881275" finds it too, though it's written "৮৮১২৭৫"
+- **Banglish**: Bengali typed in English letters is searched in Bengali too. "atoshbaji" finds the fireworks video,
+  "basha theke office er kaj" the contract, "kemon" the file "কেমন আছো.docx" in Name mode; English stays English
 - "TXN-58K3Q" or "ORD-77A91X" finds the screenshot or email with exactly that code
 - "code: kill the child process when the app exits" opens the function in VS Code at its line
 - **Name mode** (Tab): type any part of any file or folder name on the whole PC ("ract si" → contract_signed.docx),
@@ -73,6 +75,10 @@ Press **Ctrl+Alt+Space** (change it in Settings) in any app and describe what yo
 
 Start a query with `code:` to search the folders chosen for code.
 
+**Banglish.** When a query has Bengali typed in English letters, a quiet line under the field says what was searched
+("also searched: আতশবাজি"). Click "search only as typed" there, or press **Ctrl+B**, to search that query as typed.
+Turn it off in Settings.
+
 **Name mode** keeps the names (never the contents) of every file and folder on the PC's fixed drives: about a million
 on a typical PC, read in under a minute without admin rights, then kept up to date by watching the drives. Any part of
 a name matches, spaces separate parts that must all be there, and exact names come first, then your own files before
@@ -112,13 +118,23 @@ your words   ─► the model's text part ─► meaning (numpy) and exact words
   prefixes.
 - **Fusion:** reciprocal rank fusion of the two rankings; files holding every code or ID in the query come first, and
   files of the kind the query names ("…in a video") before others.
+- **Banglish:** each Latin word is English, Banglish, or both ("rat" is রাত next to Banglish, a rat next to English),
+  decided with the English dictionary in Tesseract's model, ranked by EmbeddingGemma's tokenizer. A Banglish word gets
+  its likeliest Bengali spellings from phonetic rules (consonants, conjuncts, vowel signs, ং ঃ ঁ ৎ, and the usual
+  ambiguities: sh/s, o/a, i/ee, z/j…), steered by the 40 000 words of Tesseract's Bengali dictionary. Meaning then
+  reads the query in Bengali ("বাসা থেকে office এর কাজ"); words match as typed or as any of those spellings; Name mode
+  looks for the Bengali names too. All offline, in a few milliseconds.
 
 ## Checked
 
 - `tests/test_reference.py`: llama.cpp's vectors against Google's official model (sentence-transformers, float32) on
   our own inputs. Worst cosine: CUDA 0.998, Vulkan 0.999, CPU 0.998. A backend that fails isn't used.
 - `scripts/eval.py`: 32 queries (9 in Bengali) over `scripts/make_testbed.py`'s files: 32/32 first and 8/8 at the
-  right page or moment, on CUDA, Vulkan and the CPU alike.
+  right page or moment, on CUDA, Vulkan and the CPU alike. With Banglish on, the same 32/32 and 8/8.
+- Banglish: 32 queries over the same files (spellings of the same words, Banglish mixed with English): 30/32 first,
+  32/32 in the top 3, 10/10 at the right moment or page (as typed: 19/32 first). Name mode: 15/15 first (10 Bengali
+  names found from Banglish, 5 Latin names still first). A converted query takes about 1 ms more (5 ms at most), for
+  the spellings; any other query about 0.1 ms; the model still reads one prompt.
 
 | On an RTX 3070 | CUDA | Vulkan | CPU (i7-13700KF) |
 |---|---|---|---|
@@ -137,6 +153,7 @@ uv run lazyfinds folders --add D:\Photos     # --remove, --exclude, --code <fold
 uv run lazyfinds index                       # read new and changed files
 uv run lazyfinds search a bicycle in the park --lines
 uv run lazyfinds search "code: parse the settings file"
+uv run lazyfinds search atoshbaji                       # --as-typed: no Banglish
 uv run lazyfinds status --problems
 ```
 
@@ -150,6 +167,7 @@ uv run pytest
 uv run python scripts/make_testbed.py C:\tmp\testbed     # test files from Windows' own fonts, voices and wallpaper
 $env:LAZYFINDS_INDEX = "C:\tmp\test.sqlite"; uv run lazyfinds index C:\tmp\testbed; uv run python scripts/eval.py
 cd tools\reference; uv run python make_reference.py C:\tmp\testbed ..\..\tests\reference   # official vectors (CPU)
+uv run python scripts/make_wordlists.py      # Banglish word lists, from the OCR models and the model's tokenizer
 ```
 
 Build the installer (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`):
@@ -167,3 +185,6 @@ installer downloads `lazyFinds-<version>-app.7z` from there: `lazyFinds-Setup-<v
 ## License
 
 MIT. EmbeddingGemma 2 is Apache 2.0 (Google), llama.cpp MIT (ggml-org), Tesseract and its models Apache 2.0.
+The Banglish word lists in `src/lazyfinds/data` are taken from the dictionaries inside Tesseract's English and Bengali
+models (tessdata_best, Apache 2.0) and from EmbeddingGemma 2's tokenizer (Apache 2.0); the transliteration rules are
+lazyFinds' own.

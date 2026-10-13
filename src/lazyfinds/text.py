@@ -39,7 +39,7 @@ def split_words(text: str) -> list[str]:
 ENGLISH_STOP = set("""a an and are as at be but by can do does for from had has have how i if in into is it its me my
 of on or our so that the their them there these they this to was we were what when where which who why will with you
 your find show me any some""".split())
-BENGALI_STOP = set("""এবং ও আর কি কী কে কোন কোথায় যে যা এই সেই ওই একটা একটি আমার আমি আমাদের তার তাদের থেকে জন্য
+BENGALI_STOP = set("""এবং ও আর এর কি কী কে কোন কোথায় যে যা এই সেই ওই একটা একটি আমার আমি আমাদের তার তাদের থেকে জন্য
 নিয়ে দিয়ে সাথে মধ্যে করে হয় হবে ছিল আছে খুঁজে দেখাও দাও""".split())
 
 # Words that name a kind of file: the query asks for that kind ("…in a video", "ভিডিওতে").

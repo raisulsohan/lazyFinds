@@ -14,6 +14,7 @@ for package in ("winrt", "pypdfium2", "pypdfium2_raw", "pillow_heif", "watchdog"
     datas += d
     binaries += b
     hidden += h
+datas.append((os.path.join(HERE, "..", "src", "lazyfinds", "data"), "lazyfinds/data"))   # Banglish word lists
 
 excluded = ["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore", "PySide6.QtQuick",
             "PySide6.QtQml", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtDesigner",

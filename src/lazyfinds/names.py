@@ -266,42 +266,23 @@ class Names:
         return out
 
     def search(self, query: str, limit: int = 200, folders_only: bool = False,
-               extensions: set[str] | None = None) -> list[Found]:
-        pieces = [p for p in query.lower().split() if p]
-        if not pieces:
-            return []
+               extensions: set[str] | None = None, also: list[str] | tuple[str, ...] = ()) -> list[Found]:
+        """Names holding every piece of the query. `also`: other forms of it (its Bengali spellings, for Banglish); a
+        name that holds every piece of any form matches, and all of them are ranked together."""
         with self.lock:
-            # The longest piece is the rarest: scan for it, then check the others in each candidate's name. A piece of
-            # one or two letters is in hundreds of thousands of names: rank a sample, as the list shows 200 anyway.
-            first = max(pieces, key=len)
-            others = [p for p in pieces if p is not first]
-            candidates = self._find(first, limit=20_000 if len(first) >= 3 else 3_000)
-            hits = []
-            for i in candidates:
-                low = self.name[i].lower()
-                if others and not all(p in low for p in others):
+            found: dict[int, tuple[tuple, list[str]]] = {}   # entry -> (its rank, the pieces it holds)
+            for form in (query, *also):
+                pieces = [p for p in form.lower().split() if p]
+                if not pieces:
                     continue
-                if folders_only and not self.is_dir[i]:
-                    continue
-                if extensions is not None and (self.is_dir[i] or rules.extension(low) not in extensions):
-                    continue
-                hits.append(i)
-            whole = " ".join(pieces)
-
-            def rank(i: int):
-                low = self.name[i].lower()
-                stem = low.rsplit(".", 1)[0] if not self.is_dir[i] else low
-                at = low.find(first)
-                word_start = at == 0 or not low[at - 1].isalnum()
-                return (-(stem == whole or low == whole), self._is_system(self.parent[i]), -low.startswith(first),
-                        -word_start, len(low), -self.mtime[i])
-
-            hits.sort(key=rank)
+                for i, key in self._matches(pieces, folders_only, extensions):
+                    if i not in found or key < found[i][0]:
+                        found[i] = (key, pieces)
             out = []
-            for i in hits[:limit]:
+            for i in sorted(found, key=lambda i: found[i][0])[:limit]:
                 low = self.name[i].lower()
                 marks = []
-                for p in pieces:
+                for p in found[i][1]:
                     at = low.find(p)
                     if at >= 0:
                         marks.append((at, at + len(p)))
@@ -309,6 +290,27 @@ class Names:
                                  is_dir=bool(self.is_dir[i]), size=self.size[i], modified=self.mtime[i],
                                  marks=sorted(marks)))
             return out
+
+    def _matches(self, pieces: list[str], folders_only: bool, extensions: set[str] | None):
+        """(entry, rank) for each name holding every piece; a lower rank comes first."""
+        # The longest piece is the rarest: scan for it, then check the others in each candidate's name. A piece of
+        # one or two letters is in hundreds of thousands of names: rank a sample, as the list shows 200 anyway.
+        first = max(pieces, key=len)
+        others = [p for p in pieces if p is not first]
+        whole = " ".join(pieces)
+        for i in self._find(first, limit=20_000 if len(first) >= 3 else 3_000):
+            low = self.name[i].lower()
+            if others and not all(p in low for p in others):
+                continue
+            if folders_only and not self.is_dir[i]:
+                continue
+            if extensions is not None and (self.is_dir[i] or rules.extension(low) not in extensions):
+                continue
+            stem = low.rsplit(".", 1)[0] if not self.is_dir[i] else low
+            at = low.find(first)
+            word_start = at == 0 or not low[at - 1].isalnum()
+            yield i, (-(stem == whole or low == whole), self._is_system(self.parent[i]), -low.startswith(first),
+                      -word_start, len(low), -self.mtime[i])
 
 
 class NameService:

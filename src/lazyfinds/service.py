@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from . import banglish as B
 from . import code as C
 from . import engine as E
 from . import extract as X
@@ -180,11 +181,15 @@ def _worth_a_look(path: str) -> bool:
 
 class QueryService:
     """Searches off the UI thread; the newest query wins. Each query answers twice: words at once (no model), then
-    words and meaning. "code: …" searches the code index."""
+    words and meaning. "code: …" searches the code index.
+
+    Banglish: "on" searches a query with Banglish words in its Bengali form, "typed" only as typed (the Bengali
+    form is still reported, so the panel can offer it), "off" doesn't look for Banglish at all. Each answer carries
+    the Bengali form ("" for none)."""
 
     IDLE = 10 * 60
 
-    def __init__(self, on_results: Callable[[int, str, list, bool], None]):
+    def __init__(self, on_results: Callable[[int, str, list, bool, str], None]):
         self.on_results = on_results
         self._queue: queue.Queue = queue.Queue()
         self._engine: E.Engine | None = None
@@ -197,9 +202,10 @@ class QueryService:
     def start(self):
         threading.Thread(target=self._loop, name="search", daemon=True).start()
         threading.Thread(target=self._idle, name="search-idle", daemon=True).start()
+        threading.Thread(target=B.warm, name="banglish-warm", daemon=True).start()
 
-    def submit(self, seq: int, text: str, kinds: set[str] | None = None):
-        self._queue.put((seq, text, kinds))
+    def submit(self, seq: int, text: str, kinds: set[str] | None = None, banglish: str = "on"):
+        self._queue.put((seq, text, kinds, banglish))
 
     def warm(self):
         threading.Thread(target=self._get_engine, name="search-warm", daemon=True).start()
@@ -242,34 +248,45 @@ class QueryService:
             item = self._queue.get()
             while not self._queue.empty():
                 item = self._queue.get_nowait()
-            seq, text, kinds = item
+            seq, text, kinds, banglish = item
             try:
-                self._run(seq, text, kinds)
+                self._run(seq, text, kinds, banglish)
             except Exception:
                 log.exception("search %r", text)
-                self.on_results(seq, text, [], True)
+                self.on_results(seq, text, [], True, "")
 
-    def _run(self, seq: int, text: str, kinds):
+    def _run(self, seq: int, text: str, kinds, banglish: str = "on"):
         code_query = C.query_of(text)
         searcher = self._searcher(code_query is not None)
         query = code_query if code_query is not None else text
         if not query.strip():
-            self.on_results(seq, text, [], True)
+            self.on_results(seq, text, [], True, "")
             return
-        find = (lambda v: C.search(searcher, query, v, typing=True)) if code_query is not None else \
-            (lambda v: searcher.search(query, v, kinds=kinds, typing=True))
-        self.on_results(seq, text, find(None), False)
+        conversion = B.convert(query) if code_query is None and banglish != "off" else None
+        shown = conversion.shown if conversion else ""
+        if banglish != "on":
+            conversion = None
+        if code_query is not None:
+            def find(v):
+                return C.search(searcher, query, v, typing=True)
+        else:
+            def find(v):
+                return searcher.search(query, v, kinds=kinds, typing=True, also=conversion)
+        self.on_results(seq, text, find(None), False, shown)
         if not self._queue.empty():
             return
         engine = self._get_engine()
         if engine is None:
-            self.on_results(seq, text, find(None), True)
+            self.on_results(seq, text, find(None), True, shown)
             return
-        prompt = E.code_query_prompt(query) if code_query is not None else E.query_prompt(query)
+        if code_query is not None:
+            prompt = E.code_query_prompt(query)
+        else:
+            prompt = E.query_prompt(conversion.text if conversion else query)
         vector = engine.embed_texts([prompt])[0]
         self._used = time.monotonic()
         if self._queue.empty():
-            self.on_results(seq, text, find(vector), True)
+            self.on_results(seq, text, find(vector), True, shown)
 
     def close(self):
         with self._engine_lock:
