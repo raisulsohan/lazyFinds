@@ -17,6 +17,8 @@ class Settings:
     watch: bool = True
     backend: str = "auto"          # auto | cuda | vulkan | cpu
     bengali_ocr: bool = True       # Tesseract for Bengali text in pictures, when it's installed
+    name_search: bool = True       # keep every file and folder name on the PC for "Name" searches
+    search_mode: str = "meaning"   # the panel's last mode: "name" or "meaning"
     first_run_done: bool = False
 
     @classmethod

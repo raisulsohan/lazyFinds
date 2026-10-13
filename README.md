@@ -10,6 +10,8 @@ English or Bengali, and lazyFinds finds it. Everything runs on your PC: no accou
 - "বিদ্যুৎ বিল" finds the Bengali payment screenshot; "881275" finds it too, though it's written "৮৮১২৭৫"
 - "TXN-58K3Q" or "ORD-77A91X" finds the screenshot or email with exactly that code
 - "code: kill the child process when the app exits" opens the function in VS Code at its line
+- **Name mode** (Tab): type any part of any file or folder name on the whole PC ("ract si" → contract_signed.docx),
+  with results as you type
 
 It runs Google DeepMind's [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (Apache 2.0), which puts
 text, pictures, sound and video into one shared space, on [llama.cpp](https://github.com/ggml-org/llama.cpp).
@@ -26,10 +28,12 @@ Inspired by DigUp for macOS; written from scratch for Windows.
 
 ## Install
 
-Download `lazyFinds-Setup-<version>.exe` from [Releases](https://github.com/raisulsohan/lazyFinds/releases) and run
-it. It installs for your user only (no admin rights) into `%LOCALAPPDATA%\Programs\lazyFinds`, with a Start menu
-entry, and can start lazyFinds when you sign in. The installer isn't code-signed yet, so Windows SmartScreen may ask
-first: choose "More info" → "Run anyway".
+Download `lazyFinds-Setup-<version>.exe` (about 3 MB) from
+[Releases](https://github.com/raisulsohan/lazyFinds/releases) and run it. It downloads the app (about 52 MB) from the
+same release, checks its SHA-256, and installs it for your user only (no admin rights) into
+`%LOCALAPPDATA%\Programs\lazyFinds`, with a Start menu entry; it can start lazyFinds when you sign in. For a PC without
+internet, use `lazyFinds-Setup-<version>-offline.exe`, which has everything inside. The installers aren't code-signed
+yet, so Windows SmartScreen may ask first: choose "More info" → "Run anyway".
 
 Uninstall from Settings → Apps. It asks whether to delete the downloaded model and the index too; your own files are
 never touched.
@@ -51,6 +55,7 @@ Press **Ctrl+Alt+Space** (change it in Settings) in any app and describe what yo
 
 | Key | What it does |
 |---|---|
+| Tab | Switches between **Meaning** (what's inside files) and **Name** (any part of any name on the PC) |
 | ↓ ↑ | Moves through the results |
 | Enter | Opens the result where it matched: a PDF at its page, sound and video at the moment, code at its line |
 | Space | Previews it (after you've moved to a result): the picture, the page, the passage, a player at the moment |
@@ -59,6 +64,11 @@ Press **Ctrl+Alt+Space** (change it in Settings) in any app and describe what yo
 | Esc | Closes the preview, then the panel |
 
 Start a query with `code:` to search the folders chosen for code.
+
+**Name mode** keeps the names (never the contents) of every file and folder on the PC's fixed drives: about a million
+on a typical PC, read in under a minute without admin rights, then kept up to date by watching the drives. Any part of
+a name matches, spaces separate parts that must all be there, and exact names come first, then your own files before
+the ones Windows and programs keep (AppData, Program Files, …). A search takes 15–40 ms. Turn it off in Settings.
 
 ## What it reads
 
@@ -137,8 +147,12 @@ cd tools\reference; uv run python make_reference.py C:\tmp\testbed ..\..\tests\r
 Build the installer (needs Inno Setup 6: `winget install JRSoftware.InnoSetup`):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging/build.ps1   # → packaging/Output/lazyFinds-Setup-<version>.exe
+powershell -ExecutionPolicy Bypass -File packaging/build.ps1
 ```
+
+It writes three files to `packaging/Output`; upload all three to the release tagged `v<version>`, since the web
+installer downloads `lazyFinds-<version>-app.7z` from there: `lazyFinds-Setup-<version>.exe` (web, ~3 MB),
+`lazyFinds-<version>-app.7z` and `lazyFinds-Setup-<version>-offline.exe`.
 
 `LAZYFINDS_HOME` moves all of lazyFinds' files; `LAZYFINDS_INDEX` and `LAZYFINDS_CODE_INDEX` move only the indexes.
 

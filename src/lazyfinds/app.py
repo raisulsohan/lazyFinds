@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFil
                                QSizePolicy, QSlider, QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget)
 
 from . import code as C
-from . import extract, opener, paths
+from . import extract, opener, paths, rules
 from . import text as T
 from .search import Hit, strong_count
 from .service import IndexService, QueryService, code_index_path, index_path
@@ -40,6 +40,9 @@ APP_NAME = "lazyFinds"
 KIND_LABEL = {"screenshot": "Screenshot", "image": "Picture", "pdf": "PDF", "doc": "Document", "audio": "Audio",
               "video": "Video", "code": "Code"}
 KIND_GLYPH = {"pdf": "📄", "doc": "📝", "audio": "🎵", "video": "🎬", "image": "🖼️", "screenshot": "🖥️", "code": "💻"}
+NAME_FILTERS = [("All", None), ("Folders", "folders"), ("Pictures", rules.KINDS["image"]),
+                ("Documents", rules.KINDS["doc"] | rules.KINDS["pdf"] | {"doc", "xls", "xlsx", "ppt", "pptx", "csv"}),
+                ("Audio", rules.KINDS["audio"]), ("Video", rules.KINDS["video"])]
 FILTERS = [("All", None), ("Pictures", {"image", "screenshot"}), ("PDFs", {"pdf"}), ("Docs", {"doc"}),
            ("Audio", {"audio"}), ("Video", {"video"})]
 
@@ -117,6 +120,7 @@ def parse_hotkey(text: str) -> tuple[int, int] | None:
 class Bridge(QObject):
     """Signals from the worker threads, delivered on the UI thread."""
     results = Signal(int, str, object, bool)
+    name_status = Signal(str)
     status = Signal(object)
     thumb = Signal(str, QImage)
     setup_progress = Signal(str, int, int)
@@ -169,6 +173,81 @@ class ResultRow(QWidget):
         self.thumb.setPixmap(pix.copy(x, y, 64, 48))
 
 
+class NameRow(QWidget):
+    """A name result: the file's own icon, the name with the typed pieces in bold, where it is, size and date."""
+
+    icons = None
+
+    def __init__(self, hit: Hit):
+        super().__init__()
+        from PySide6.QtCore import QFileInfo
+        from PySide6.QtWidgets import QFileIconProvider
+
+        if NameRow.icons is None:
+            NameRow.icons = (QFileIconProvider(), {})
+        provider, cache = NameRow.icons
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 3, 10, 3)
+        layout.setSpacing(10)
+        icon_label = QLabel()
+        key = "<folder>" if hit.kind == "folder" else (Path(hit.path).suffix.lower() or "<none>")
+        if key in (".exe", ".lnk", ".ico", ".url"):   # these carry their own icons
+            key = hit.path
+        if key not in cache:
+            cache[key] = provider.icon(QFileInfo(hit.path)).pixmap(24, 24)
+        icon_label.setPixmap(cache[key])
+        icon_label.setFixedSize(26, 26)
+        layout.addWidget(icon_label)
+        name = Path(hit.path).name
+        marked, cursor = [], 0
+        for a, b in hit.meta.get("marks", []):
+            if a < cursor:
+                continue
+            marked.append(html.escape(name[cursor:a]) + "<b>" + html.escape(name[a:b]) + "</b>")
+            cursor = b
+        marked.append(html.escape(name[cursor:]))
+        title = QLabel("".join(marked))
+        title.setObjectName("name")
+        title.setTextFormat(Qt.TextFormat.RichText)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        text.addWidget(title)
+        where = QLabel()
+        where.setObjectName("sub")
+        where.setTextFormat(Qt.TextFormat.PlainText)
+        folder = str(Path(hit.path).parent)
+        # A long path is shortened in the middle, so the size and date stay in view.
+        where.setText(where.fontMetrics().elidedText(folder, Qt.TextElideMode.ElideMiddle, 500))
+        where.setToolTip(folder)
+        where.setMinimumWidth(0)
+        text.addWidget(where)
+        layout.addLayout(text, 1)
+        facts = [] if hit.kind == "folder" else [human_size(hit.size)]
+        facts.append(time.strftime("%Y-%m-%d %H:%M", time.localtime(hit.modified)) if hit.modified else "")
+        side = QLabel("\n".join(f for f in facts if f))
+        side.setObjectName("sub")
+        side.setTextFormat(Qt.TextFormat.PlainText)
+        side.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        side.setFixedWidth(110)
+        layout.addWidget(side)
+
+
+def human_size(n: float) -> str:
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
+        n /= 1024
+    return ""
+
+
+def name_hit(found) -> Hit:
+    """A name result as a Hit, so opening, copying and previewing work as for any result."""
+    kind = "folder" if found.is_dir else (rules.kind_of(Path(found.path)) or "file")
+    return Hit(path=found.path, kind=kind, score=0.0, meaning=None, words=1.0, strong=True, piece=0, part="name",
+               start=None, stop=None, line=None, modified=found.modified, size=found.size,
+               meta={"marks": found.marks})
+
+
 # -- the search panel
 
 
@@ -179,6 +258,9 @@ QListWidget { border: none; background: transparent; outline: none; }
 QListWidget::item { border-radius: 8px; margin: 1px 6px; }
 QListWidget::item:selected { background: rgba(79,140,255,0.22); }
 QLabel#title { font-size: 14px; font-weight: 600; }
+QLabel#name { font-size: 13px; }
+QPushButton#mode { border: 1px solid rgba(128,128,128,0.45); padding: 3px 12px; font-size: 12px; font-weight: 600; }
+QPushButton#mode:checked { background: rgba(79,140,255,0.85); color: white; border-color: rgba(79,140,255,0.9); }
 QLabel#sub { color: rgba(128,128,128,0.95); font-size: 12px; }
 QLabel#excerpt { color: palette(text); font-size: 12px; }
 QLabel#thumb { background: rgba(128,128,128,0.12); border-radius: 6px; font-size: 22px; }
@@ -213,19 +295,27 @@ class SearchPanel(QWidget):
         box.addWidget(self.query)
         chips = QHBoxLayout()
         chips.setContentsMargins(10, 0, 10, 4)
-        self.filters: list[QPushButton] = []
-        for label, kinds in FILTERS:
+        chips.setSpacing(0)
+        self.mode_buttons = {}
+        for mode, label, tip in (("meaning", "Meaning", "Describe what's inside a file"),
+                                 ("name", "Name", "Any part of a file or folder name, on the whole PC")):
             b = QPushButton(label)
-            b.setObjectName("chip")
+            b.setObjectName("mode")
             b.setCheckable(True)
-            b.setChecked(kinds is None)
+            b.setToolTip(tip + " (Tab switches)")
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(lambda _=False, k=kinds, btn=b: self._filter(k, btn))
+            b.clicked.connect(lambda _=False, m=mode: self.set_mode(m))
             chips.addWidget(b)
-            self.filters.append(b)
+            self.mode_buttons[mode] = b
+        chips.addSpacing(12)
+        self.chip_row = QHBoxLayout()
+        self.chip_row.setSpacing(4)
+        chips.addLayout(self.chip_row)
         chips.addStretch(1)
         box.addLayout(chips)
-        self.kinds: set[str] | None = None
+        self.filters: list[QPushButton] = []
+        self.kinds = None
+        self.mode = ""
         self.list = QListWidget()
         self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
@@ -242,7 +332,7 @@ class SearchPanel(QWidget):
         self.debounce.timeout.connect(self._submit)
         self.hotkey_id = 1
         self.hotkey_ok = False
-        self.update_footer()
+        self.set_mode(Settings.load().search_mode, save=False)
 
     # hotkey
 
@@ -300,6 +390,36 @@ class SearchPanel(QWidget):
         self.moved = False
         self.debounce.start()
 
+    def set_mode(self, mode: str, save: bool = True):
+        mode = mode if mode in ("meaning", "name") else "meaning"
+        for m, b in self.mode_buttons.items():
+            b.setChecked(m == mode)
+        if mode != self.mode:
+            self.mode = mode
+            for b in self.filters:
+                b.deleteLater()
+            self.filters = []
+            for label, kinds in (NAME_FILTERS if mode == "name" else FILTERS):
+                b = QPushButton(label)
+                b.setObjectName("chip")
+                b.setCheckable(True)
+                b.setChecked(kinds is None)
+                b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                b.clicked.connect(lambda _=False, k=kinds, btn=b: self._filter(k, btn))
+                self.chip_row.addWidget(b)
+                self.filters.append(b)
+            self.kinds = None
+            self.query.setPlaceholderText("Any part of a file or folder name…" if mode == "name"
+                                          else "Describe what you're looking for…")
+            if save:
+                s = Settings.load()
+                s.search_mode = mode
+                s.save()
+            self.list.clear()   # the other mode's results mustn't linger while this one's arrive
+            if self.query.text().strip():
+                self._submit()
+        self.update_footer()
+
     def _filter(self, kinds, button):
         for b in self.filters:
             b.setChecked(b is button)
@@ -308,7 +428,10 @@ class SearchPanel(QWidget):
 
     def _submit(self):
         self.seq += 1
-        self.app.query.submit(self.seq, self.query.text(), self.kinds)
+        if self.mode == "name":
+            self.app.find_names(self.seq, self.query.text(), self.kinds)
+        else:
+            self.app.query.submit(self.seq, self.query.text(), self.kinds)
 
     def show_results(self, seq: int, text: str, hits: list[Hit], final: bool):
         if seq != self.seq:
@@ -327,6 +450,13 @@ class SearchPanel(QWidget):
                 self.list.addItem(sep)
                 self.list.setItemWidget(sep, label)
             item = QListWidgetItem()
+            if hit.part == "name":
+                row = NameRow(hit)
+                item.setSizeHint(row.sizeHint().expandedTo(QSize(10, 40)))
+                item.setData(Qt.ItemDataRole.UserRole, hit)
+                self.list.addItem(item)
+                self.list.setItemWidget(item, row)
+                continue
             row = ResultRow(hit)
             item.setSizeHint(row.sizeHint().expandedTo(QSize(10, 60)))
             item.setData(Qt.ItemDataRole.UserRole, hit)
@@ -348,7 +478,8 @@ class SearchPanel(QWidget):
                     break
         self._select(target if self.list.count() else -1)
         if text.strip() and final and not hits:
-            self.footer.setText("Nothing found. Try other words, or describe what it shows.")
+            self.footer.setText("No name holds that. Tab searches by meaning." if self.mode == "name" else
+                                "Nothing found. Try other words, or describe what it shows. Tab searches names.")
         else:
             self.update_footer(searching=not final and bool(text.strip()))
 
@@ -365,6 +496,10 @@ class SearchPanel(QWidget):
             row.set_thumb(image)
 
     def update_footer(self, searching: bool = False):
+        if self.mode == "name":
+            self.footer.setText("   ".join(x for x in (self.app.name_status,
+                                "↩ open · Ctrl+↩ show in folder · Ctrl+C copy · Tab: search by meaning") if x))
+            return
         s = self.app.index_status
         parts = []
         if searching:
@@ -379,7 +514,7 @@ class SearchPanel(QWidget):
             parts.append("Problem: " + (s.get("error") or "")[:80])
         if self.app.query.engine_error:
             parts.append("Meaning search unavailable: " + self.app.query.engine_error[:60])
-        parts.append("↩ open · Space preview · Ctrl+↩ show in folder · Ctrl+C copy · code: searches code")
+        parts.append("↩ open · Space preview · Ctrl+↩ show in folder · code: searches code · Tab: search names")
         self.footer.setText("   ".join(parts))
 
     # keys
@@ -415,6 +550,9 @@ class SearchPanel(QWidget):
         if obj is self.query and e.type() == QEvent.Type.KeyPress:
             key, mods = e.key(), e.modifiers()
             ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+            if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                self.set_mode("name" if self.mode == "meaning" else "meaning")
+                return True
             if key == Qt.Key.Key_Down:
                 self._step(1)
                 return True
@@ -484,7 +622,7 @@ class SearchPanel(QWidget):
 
     def preview_current(self):
         hit = self.current_hit()
-        if hit:
+        if hit and (hit.part != "name" or hit.kind in ("image", "screenshot", "pdf", "audio", "video")):
             self.app.preview.show_hit(hit, autoplay=hit.kind in ("audio", "video"))
 
 
@@ -793,6 +931,10 @@ class SettingsWindow(QWidget):
         self.watch = QCheckBox("Read new and changed files as they appear")
         self.watch.toggled.connect(self._watch)
         layout.addWidget(self.watch)
+        self.name_search = QCheckBox("Keep every file and folder name on this PC for Name search (names only, "
+                                     "never what's inside)")
+        self.name_search.toggled.connect(lambda on: self._save(lambda s: setattr(s, "name_search", on)))
+        layout.addWidget(self.name_search)
         self.startup = QCheckBox("Start lazyFinds when I sign in to Windows")
         self.startup.toggled.connect(self._startup)
         layout.addWidget(self.startup)
@@ -827,6 +969,9 @@ class SettingsWindow(QWidget):
         self.watch.blockSignals(True)
         self.watch.setChecked(s.watch)
         self.watch.blockSignals(False)
+        self.name_search.blockSignals(True)
+        self.name_search.setChecked(s.name_search)
+        self.name_search.blockSignals(False)
         self.startup.blockSignals(True)
         self.startup.setChecked(startup_enabled())
         self.startup.blockSignals(False)
@@ -1120,12 +1265,18 @@ class LazyFindsApp(QObject):
         self.thumb_pool = ThreadPoolExecutor(3, thread_name_prefix="thumb")
         self.query = QueryService(lambda *a: self.bridge.results.emit(*a))
         self.indexing = IndexService(lambda s: self.bridge.status.emit(s))
+        from .names import NameService
+
+        self.name_status = ""
+        self.names = NameService(lambda text: self.bridge.name_status.emit(text))
+        self.name_pool = ThreadPoolExecutor(1, thread_name_prefix="names")
         self.panel = SearchPanel(self)
         self.preview = Preview(self)
         self.settings_window: SettingsWindow | None = None
         self.bridge.results.connect(self.panel.show_results)
         self.bridge.status.connect(self._status)
         self.bridge.thumb.connect(self.panel.set_thumb)
+        self.bridge.name_status.connect(self._name_status)
         self.tray = QSystemTrayIcon(make_icon(), self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
@@ -1160,6 +1311,7 @@ class LazyFindsApp(QObject):
                 self.tray.showMessage(APP_NAME, "Search needs the model. Open Settings to download it later.")
         self.query.start()
         self.indexing.start()
+        self.names.start()
         if not s.folders:
             self.show_settings()
         elif not s.first_run_done:
@@ -1188,6 +1340,25 @@ class LazyFindsApp(QObject):
         if self.settings_window and self.settings_window.isVisible() and state in ("idle", "paused"):
             self.settings_window.refresh_stats()
 
+    def _name_status(self, text: str):
+        self.name_status = text
+        if self.panel.isVisible() and self.panel.mode == "name":
+            self.panel.update_footer()
+
+    def find_names(self, seq: int, text: str, kinds):
+        """Name search off the UI thread; the answer comes back as ordinary results."""
+        def work():
+            if seq != self.panel.seq:   # a newer query was typed meanwhile
+                return
+            if not text.strip():
+                self.bridge.results.emit(seq, text, [], True)
+                return
+            found = self.names.names.search(text, folders_only=kinds == "folders",
+                                            extensions=kinds if isinstance(kinds, (set, frozenset)) else None)
+            self.bridge.results.emit(seq, text, [name_hit(f) for f in found], True)
+
+        self.name_pool.submit(work)
+
     def _toggle_pause(self):
         paused = not self.indexing.paused
         self.indexing.pause(paused)
@@ -1214,6 +1385,7 @@ class LazyFindsApp(QObject):
 
     def quit(self):
         self.indexing.stop()
+        self.names.stop()
         self.query.close()
         self.tray.hide()
         self.qt.quit()
