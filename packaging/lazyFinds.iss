@@ -1,7 +1,7 @@
 ; Inno Setup script for lazyFinds. Build the app folder first (packaging/build.ps1 does both).
 ; Installs per user, without admin rights. The model and llama.cpp are downloaded by the app on first start.
 
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 
 [Setup]
 AppId={{8F3C2A51-6B7D-4E2A-9C41-5A1D2E7B9F30}

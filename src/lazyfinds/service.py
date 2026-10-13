@@ -143,6 +143,10 @@ class IndexService:
             if self.paused or self._stop.is_set():
                 break
             store = Store(path)
+            if paths.ffmpeg_ready():
+                again = store.read_again(X.FFMPEG_MISSING)
+                if again:
+                    log.info("ffmpeg is there now: reading %d sound and video files again", again)
             indexer = Indexer(store, kind_of=kind_of, read=read, backend=s.backend)
             try:
                 self._emit(state="scanning", error=None)

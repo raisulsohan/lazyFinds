@@ -116,15 +116,56 @@ def models_ready() -> bool:
         any(backend_ready(b) for b in ("cuda", "vulkan"))
 
 
-def tesseract_exe() -> Path | None:
-    found = shutil.which("tesseract")
+def _saved_path() -> list[str]:
+    """PATH as Windows has it saved now. A program installed after lazyFinds started (winget adds its folder to the
+    user's PATH) isn't on this process's PATH until a restart, but it is here."""
+    import winreg
+
+    folders: list[str] = []
+    for root, key in ((winreg.HKEY_CURRENT_USER, "Environment"),
+                      (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")):
+        try:
+            with winreg.OpenKey(root, key) as k:
+                value, _ = winreg.QueryValueEx(k, "Path")
+            folders += [os.path.expandvars(p) for p in str(value).split(";") if p.strip()]
+        except OSError:
+            continue
+    return folders
+
+
+def find_program(name: str, also: list[Path] | None = None) -> Path | None:
+    """`name`.exe on PATH, on the PATH Windows has saved, or in `also`."""
+    found = shutil.which(name)
     if found:
         return Path(found)
-    for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
-                 str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs")):
-        if base and (Path(base) / "Tesseract-OCR" / "tesseract.exe").is_file():
-            return Path(base) / "Tesseract-OCR" / "tesseract.exe"
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    for folder in _saved_path() + [str(local / "Microsoft" / "WinGet" / "Links")] + [str(f) for f in also or []]:
+        candidate = Path(folder) / f"{name}.exe"
+        if candidate.is_file():
+            return candidate
     return None
+
+
+FFMPEG_WINGET_ID = "Gyan.FFmpeg"
+TESSERACT_WINGET_ID = "UB-Mannheim.TesseractOCR"
+
+
+def ffmpeg_exe(name: str = "ffmpeg") -> Path | None:
+    """ffmpeg or ffprobe, wherever winget or the user put it."""
+    packages = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+    return find_program(name, sorted(packages.glob("Gyan.FFmpeg*/*/bin")))
+
+
+def ffmpeg_ready() -> bool:
+    return ffmpeg_exe("ffmpeg") is not None and ffmpeg_exe("ffprobe") is not None
+
+
+def tesseract_exe() -> Path | None:
+    places = [Path(base) / "Tesseract-OCR" for base in (os.environ.get("ProgramFiles"),
+                                                         os.environ.get("ProgramFiles(x86)"),
+                                                         str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"))
+              if base]
+    return find_program("tesseract", places)
 
 
 def bengali_ocr_ready() -> bool:

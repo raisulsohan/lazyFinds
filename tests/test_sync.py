@@ -71,3 +71,17 @@ def test_kinds():
     assert rules.kind_of(Path("PXL_1.jpg")) == "image"
     assert rules.kind_of(Path("a.mp3")) == "audio" and rules.kind_of(Path("a.py")) is None
     assert rules.is_code(Path("a.py")) and not rules.is_code(Path("app.min.js"))
+
+
+def test_files_that_waited_for_ffmpeg_are_read_again(tmp_path):
+    from lazyfinds.extract import FFMPEG_MISSING
+
+    make(tmp_path / "m", ["a.txt", "b.txt"])
+    store = Store(tmp_path / "i.sqlite")
+    Indexer(store).sync([tmp_path / "m"])
+    ids = [row[0] for row in store.all_files().values()]
+    store.mark(ids[0], "failed", f"{FFMPEG_MISSING}: Settings → Install ffmpeg")
+    store.mark(ids[1], "failed", "can't read the picture (OSError)")
+    assert store.read_again(FFMPEG_MISSING) == 1
+    status = dict(store.db.execute("SELECT id, status FROM files"))
+    assert status[ids[0]] == "new" and status[ids[1]] == "failed"

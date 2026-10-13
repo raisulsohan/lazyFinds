@@ -15,7 +15,6 @@ import html.parser
 import io
 import json
 import re
-import shutil
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -25,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from . import engine as E
-from . import ocr
+from . import ocr, paths
 from . import text as T
 
 try:
@@ -320,11 +319,14 @@ def read_document(path: Path) -> Reading:
 # -- sound and video, through ffmpeg
 
 
+FFMPEG_MISSING = "ffmpeg isn't installed (sound and video need it)"
+
+
 def tool(name: str) -> str:
-    found = shutil.which(name)
-    if not found:
-        raise Unreadable("ffmpeg isn't installed (sound and video need it): winget install Gyan.FFmpeg")
-    return found
+    found = paths.ffmpeg_exe(name)
+    if found is None:
+        raise Unreadable(f"{FFMPEG_MISSING}: Settings → Install ffmpeg, or winget install {paths.FFMPEG_WINGET_ID}")
+    return str(found)
 
 
 def probe(path: Path) -> dict:

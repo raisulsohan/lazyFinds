@@ -177,6 +177,12 @@ class Store:
             text = "\n".join(t for t in (body, words) if t)
             self.db.execute("INSERT INTO words(rowid, name, body) VALUES(?, '', ?)", (piece, T.fold(text)))
 
+    def read_again(self, note_part: str) -> int:
+        """Marks unreadable files whose note holds `note_part` as new again (a missing tool was installed since)."""
+        with self.lock:
+            return self.db.execute("UPDATE files SET status = 'new', note = NULL WHERE status = 'failed' AND "
+                                   "instr(note, ?) > 0", (note_part,)).rowcount
+
     def counts(self) -> dict:
         kinds = dict(self.db.execute("SELECT kind, COUNT(*) FROM files GROUP BY kind"))
         status = dict(self.db.execute("SELECT status, COUNT(*) FROM files GROUP BY status"))

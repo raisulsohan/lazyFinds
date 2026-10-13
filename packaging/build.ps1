@@ -1,9 +1,10 @@
 # Builds dist\lazyFinds (PyInstaller) and packaging\Output\lazyFinds-Setup-<version>.exe (Inno Setup 6).
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+# Run `uv sync` once first. The build itself never syncs, so a lazyFinds running from .venv doesn't block it.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
-uv run pyinstaller packaging\lazyFinds.spec --noconfirm --distpath dist --workpath build
+uv run --no-sync pyinstaller packaging\lazyFinds.spec --noconfirm --distpath dist --workpath build
 $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
           "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 isn't installed: winget install JRSoftware.InnoSetup" }

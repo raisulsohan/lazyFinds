@@ -14,6 +14,7 @@ import logging.handlers
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from pathlib import Path
@@ -694,6 +695,8 @@ class Preview(QWidget):
 
 
 class SettingsWindow(QWidget):
+    tools_changed = Signal()
+
     def __init__(self, app: "LazyFindsApp"):
         super().__init__(None)
         self.app = app
@@ -765,6 +768,19 @@ class SettingsWindow(QWidget):
         row.addStretch(1)
         layout.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(QLabel("Audio and video:"))
+        self.ffmpeg_state = QLabel()
+        row.addWidget(self.ffmpeg_state)
+        self.ffmpeg_setup = QPushButton("Install ffmpeg…")
+        self.ffmpeg_setup.clicked.connect(self._setup_ffmpeg)
+        row.addWidget(self.ffmpeg_setup)
+        row.addStretch(1)
+        layout.addLayout(row)
+        self.tools_changed.connect(self._show_tools)
+        self._waiting: dict[str, tuple[float, object, object]] = {}
+        self._poll = QTimer(self, interval=3000)
+        self._poll.timeout.connect(self._check_installs)
+        row = QHBoxLayout()
         row.addWidget(QLabel("Shortcut:"))
         self.hotkey = QLineEdit()
         self.hotkey.setMaximumWidth(200)
@@ -805,7 +821,7 @@ class SettingsWindow(QWidget):
         self.bengali.blockSignals(True)
         self.bengali.setChecked(s.bengali_ocr)
         self.bengali.blockSignals(False)
-        self._show_bengali()
+        self._show_tools()
         self.hotkey.setText(s.hotkey)
         self.hotkey_state.setText("✓ active" if self.app.panel.hotkey_ok else "✗ taken by another app")
         self.watch.blockSignals(True)
@@ -863,34 +879,86 @@ class SettingsWindow(QWidget):
             self.backend.currentData())
         self.backend_state.setText(f"runs on {names[chosen]}" + (" (that one isn't downloaded)" if missing else ""))
 
+    # -- helper programs (ffmpeg, Tesseract): installed with winget, noticed without a restart
+
+    def _show_tools(self):
+        self._show_bengali()
+        installing = paths.FFMPEG_WINGET_ID in self._waiting
+        ready = paths.ffmpeg_ready()
+        self.ffmpeg_setup.setVisible(not ready and not installing)
+        self.ffmpeg_state.setText("✓ ffmpeg found" if ready else "installing ffmpeg…" if installing else
+                                  "need ffmpeg (free) to be read")
+
     def _show_bengali(self):
         ready = paths.bengali_ocr_ready()
         has_tesseract = paths.tesseract_exe() is not None
-        self.bengali_setup.setVisible(not ready)
-        self.bengali_state.setText("✓ ready" if ready else
+        installing = paths.TESSERACT_WINGET_ID in self._waiting
+        self.bengali_setup.setVisible(not ready and not installing)
+        self.bengali_state.setText("✓ ready" if ready else "installing Tesseract…" if installing else
                                    "needs its language files" if has_tesseract else "needs Tesseract")
+
+    def _winget(self, package: str, title: str, ready, then) -> None:
+        """Opens a window that installs `package` with winget, then checks every few seconds (for 15 minutes) whether
+        it's there; once it is, runs `then`."""
+        import shutil
+        import subprocess
+
+        if shutil.which("winget") is None:
+            QMessageBox.information(self, APP_NAME, f"winget isn't available on this PC. Install {title} yourself, "
+                                    f"or get winget (App Installer) from the Microsoft Store.")
+            return
+        subprocess.Popen(["cmd", "/c", "start", f"Installing {title}", "winget", "install", "--id", package, "-e",
+                          "--accept-package-agreements", "--accept-source-agreements"])
+        self._waiting[package] = (time.monotonic() + 900, ready, then)
+        self._poll.start()
+        self._show_tools()
+
+    def _check_installs(self):
+        for package, (deadline, ready, then) in list(self._waiting.items()):
+            if ready():
+                del self._waiting[package]
+                then()
+            elif time.monotonic() > deadline:
+                del self._waiting[package]
+        if not self._waiting:
+            self._poll.stop()
+        self._show_tools()
+
+    def _setup_ffmpeg(self):
+        answer = QMessageBox.question(
+            self, APP_NAME, "Audio and video are read with ffmpeg (free; GPL license; about 100 MB, the gyan.dev "
+            "build through winget). Install it now? A window shows the install.")
+        if answer == QMessageBox.StandardButton.Yes:
+            # Once it's there, the next pass reads the sound and video files that waited for it.
+            self._winget(paths.FFMPEG_WINGET_ID, "ffmpeg", paths.ffmpeg_ready, lambda: self.app.indexing.request())
 
     def _setup_bengali(self):
         if paths.tesseract_exe() is None:
             answer = QMessageBox.question(
-                self, APP_NAME, "Bengali text in pictures needs Tesseract OCR (free, about 50 MB from GitHub, by "
-                "UB Mannheim). Install it with winget now? A window shows the install; Windows may ask for permission.")
+                self, APP_NAME, "Bengali text in pictures needs Tesseract OCR (free, Apache 2.0, about 50 MB, by UB "
+                "Mannheim through winget), and then its Bengali and English models (26 MB). Install them now? A "
+                "window shows the install; Windows may ask for permission.")
             if answer == QMessageBox.StandardButton.Yes:
-                import subprocess
-
-                subprocess.Popen(["cmd", "/c", "start", "Install Tesseract", "winget", "install", "--id",
-                                  "UB-Mannheim.TesseractOCR", "-e", "--accept-package-agreements",
-                                  "--accept-source-agreements"])
+                self._winget(paths.TESSERACT_WINGET_ID, "Tesseract OCR",
+                             lambda: paths.tesseract_exe() is not None, self._get_ocr_models)
             return
+        self._get_ocr_models()
+
+    def _get_ocr_models(self):
         from . import setup
 
+        if paths.bengali_ocr_ready():
+            self._show_tools()
+            return
         self.bengali_state.setText("downloading the Bengali and English models (26 MB)…")
 
         def work():
             try:
                 setup.run(only=paths.OCR_FILES)
+            except Exception as error:
+                log.warning("OCR models: %s", error)
             finally:
-                QTimer.singleShot(0, self._show_bengali)
+                self.tools_changed.emit()   # a signal: safe to send from this thread
 
         threading.Thread(target=work, daemon=True).start()
 
