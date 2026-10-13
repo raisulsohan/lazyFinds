@@ -26,6 +26,14 @@ Inspired by DigUp for macOS; written from scratch for Windows.
 - For Bengali text in pictures and scans (optional): Tesseract OCR (`winget install UB-Mannheim.TesseractOCR`);
   Settings → "Set up…" fetches its Bengali and English models
 
+## macOS
+
+There's no macOS version yet: it has to be checked on a real Mac (vectors against Google's official model on Metal,
+the menu bar app, opening files at their page or moment), and I don't have one. The code doesn't run on macOS as it is
+(it calls Windows directly in a few places). lazyFinds is MIT-licensed, so if you have a Mac, fork it and port it:
+[docs/macos-plan.md](docs/macos-plan.md) lists what differs on macOS, a plan for a platform layer, the pitfalls, and
+the checks a port needs. A pull request that keeps Windows working is welcome.
+
 ## Install
 
 Download `lazyFinds-Setup-<version>.exe` (about 3 MB) from
