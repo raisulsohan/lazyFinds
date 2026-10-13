@@ -113,7 +113,9 @@ your words   ─► the model's text part ─► meaning (numpy) and exact words
 ```
 
 - **Meaning:** each piece's cosine with the query, in robust deviations (median and MAD) above the median of its own
-  kind of vector, so a page, a photo and a stretch of sound compete fairly.
+  kind of vector, so a page, a photo and a stretch of sound compete fairly. Files of one sort (voice messages, songs,
+  screenshots) are measured from their own median: a Bengali query is closer to every Bengali voice message,
+  whatever it says, and no longer fills the list with them.
 - **Words:** FTS5 with Porter stemming for English; Bengali words lose their endings ("টমেটোর" → টমেটো) and match as
   prefixes.
 - **Fusion:** reciprocal rank fusion of the two rankings; files holding every code or ID in the query come first, and

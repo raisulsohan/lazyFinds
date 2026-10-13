@@ -5,6 +5,14 @@ for the same query (text pieces higher than pictures or sound), so each is put o
 robust deviations (1.4826 x the median absolute deviation) it stands above that kind's median. A piece "stands out"
 at MEANING_GATE or more. A file takes its best piece.
 
+Within a kind, files of one sort (the same kind of file and file type: WhatsApp voice messages, songs, screenshots,
+phone videos) can sit together above or below the rest for reasons that aren't the query's meaning: a query in Bengali
+is about two deviations closer to every Bengali voice message than to other sound, whatever the message says, so "লাল
+জামা" put 9 voice messages in the top 10 of a real index. Each such group of at least SMALL_KIND pieces is moved to its
+own median, on its kind's scale: a piece counts by how far it stands above files of its own sort. Over 28 picture
+queries on that index, voice messages in the top 10 went from 56 to 18 (the rest are the few that match in English
+too) and photos and videos from 211 to 253, with English queries as they were.
+
 Words. SQLite FTS5 over file names, folder names, document and page text and the words in pictures. A file whose
 pieces hold every query word matches fully; one that holds most of a longer query, partly.
 
@@ -22,6 +30,7 @@ first, and files of the kind the query names ("…in a video") come before files
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -69,6 +78,8 @@ class Searcher:
         self.file_ids = np.zeros(0, dtype=np.int64)
         self.sources = np.zeros(0, dtype=object)
         self.kind: dict[int, str] = {}
+        self.source_rows: dict[str, np.ndarray] = {}     # kind of vector -> its rows
+        self.groups: list[tuple[str, np.ndarray]] = []   # (kind of vector, rows) of each group of one sort of file
         self._seen = None
 
     def _version(self):
@@ -83,6 +94,15 @@ class Searcher:
         self.file_ids = np.array([r[1] for r in rows], dtype=np.int64)
         self.sources = np.array([r[2] for r in rows], dtype=object)
         self.kind = dict(self.store.db.execute("SELECT id, kind FROM files"))
+        # Groups of one sort of file within each kind of vector: (kind of vector, kind of file, file type).
+        types = {f: os.path.splitext(p)[1].lower() for f, p in self.store.db.execute("SELECT id, path FROM files")}
+        members: dict[tuple, list[int]] = {}
+        by_source: dict[str, list[int]] = {}
+        for i, (f, source) in enumerate(zip(self.file_ids.tolist(), self.sources.tolist())):
+            members.setdefault((source, self.kind.get(f), types.get(f)), []).append(i)
+            by_source.setdefault(source, []).append(i)
+        self.source_rows = {source: np.array(rows) for source, rows in by_source.items()}
+        self.groups = [(key[0], np.array(rows)) for key, rows in members.items() if len(rows) >= SMALL_KIND]
         self._seen = self._version()
 
     def refresh(self):
@@ -92,16 +112,21 @@ class Searcher:
     # -- meaning
 
     def standing(self, cosines: np.ndarray) -> np.ndarray:
-        """Each cosine in robust deviations above the median of its kind of vector."""
+        """Each cosine in robust deviations, on the scale of its kind of vector, above the median of its group of one
+        sort of file (or of its kind, when the group is small)."""
         out = np.empty(len(cosines), dtype=np.float64)
         overall = (float(np.median(cosines)), _spread(cosines))
-        for source in set(self.sources.tolist()):
-            rows = self.sources == source
-            if rows.sum() >= SMALL_KIND:
+        spreads = {}
+        for source, rows in self.source_rows.items():
+            if len(rows) >= SMALL_KIND:
                 centre, spread = float(np.median(cosines[rows])), _spread(cosines[rows])
             else:
                 centre, spread = overall
+            spreads[source] = spread
             out[rows] = (cosines[rows] - centre) / spread
+        for source, rows in self.groups:
+            # Only the centre moves; the kind's spread stays, so a group of very alike files (songs) isn't stretched.
+            out[rows] = (cosines[rows] - float(np.median(cosines[rows]))) / spreads[source]
         return out
 
     def _meaning(self, vector, allowed) -> dict[int, tuple[float, int]]:
