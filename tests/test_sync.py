@@ -85,3 +85,49 @@ def test_files_that_waited_for_ffmpeg_are_read_again(tmp_path):
     assert store.read_again(FFMPEG_MISSING) == 1
     status = dict(store.db.execute("SELECT id, status FROM files"))
     assert status[ids[0]] == "new" and status[ids[1]] == "failed"
+
+
+class StoppingEngine:
+    """Embeds the first file; for the next one, the indexing is stopped and the pool is gone, as when the app quits."""
+
+    alive = True
+
+    def __init__(self, state):
+        self.state = state
+        self.calls = 0
+
+    def embed_texts(self, texts):
+        import numpy as np
+
+        self.calls += 1
+        if self.calls > 1:
+            self.state["stop"] = True
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        return [np.ones(768, dtype=np.float32) / 768 ** 0.5 for _ in texts]
+
+
+def test_a_file_cut_short_by_stopping_stays_new(tmp_path):
+    docs = tmp_path / "docs"
+    make(docs, ["a.txt", "b.txt", "c.txt"])
+    store = Store(tmp_path / "i.sqlite")
+    indexer = Indexer(store, readers=1)
+    indexer.sync([docs])
+    state = {"stop": False}
+    indexer._engine = StoppingEngine(state)
+    indexer.run(stop=lambda: state["stop"])
+    status = sorted(row[0] for row in store.db.execute("SELECT status FROM files"))
+    assert status == ["new", "new", "read"]
+
+
+def test_files_an_old_quit_marked_failed_are_read_again(tmp_path):
+    from lazyfinds.indexer import CUT_SHORT
+
+    docs = tmp_path / "docs"
+    make(docs, ["a.txt", "b.txt"])
+    store = Store(tmp_path / "i.sqlite")
+    Indexer(store).sync([docs])
+    first, second = (row[0] for row in store.db.execute("SELECT id FROM files ORDER BY id"))
+    store.mark(first, "failed", "RuntimeError: cannot schedule new futures after shutdown")
+    store.mark(second, "failed", "can't read the picture (UnidentifiedImageError)")
+    assert store.read_again(CUT_SHORT) == 1
+    assert dict(store.db.execute("SELECT id, status FROM files")) == {first: "new", second: "failed"}

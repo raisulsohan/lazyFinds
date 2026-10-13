@@ -38,6 +38,10 @@ class Progress:
 
 Kinder = Callable[[Path], "str | None"]
 
+# Python's words when a thread pool was shut down under a file (a quit while indexing). Up to 0.1.4 such a file was
+# stored as failed and never read again; it is read again once.
+CUT_SHORT = "cannot schedule new futures after"
+
 
 def walk(roots: list[Path], excluded: list[str], kind_of: Kinder) -> tuple[dict[str, tuple], dict[str, int]]:
     """Every file under `roots` that `kind_of` gives a kind: path -> (kind, size, mtime), and how many items were
@@ -163,6 +167,12 @@ class Indexer:
                 except Exception as error:   # one odd file mustn't stop the rest
                     status, note = "failed", f"{type(error).__name__}: {error}"[:300]
                     self.store.mark(file_id, status, note)
+                if status == "failed" and stop():
+                    # Stopping (a quit, a pause) can cut a file short; that isn't the file's fault: read it next time.
+                    self.store.mark(file_id, "new")
+                    for _, f in ahead:
+                        f.cancel()
+                    break
                 progress.done += 1
                 progress.path, progress.status, progress.note = path, status, note
                 each(progress)

@@ -21,7 +21,7 @@ from . import code as C
 from . import engine as E
 from . import extract as X
 from . import paths, rules
-from .indexer import Indexer, Progress
+from .indexer import CUT_SHORT, Indexer, Progress
 from .search import Searcher
 from .settings import Settings
 from .store import Store
@@ -73,6 +73,8 @@ class IndexService:
 
     def _emit(self, **changes):
         self.status.update(changes)
+        if self._stop.is_set():   # quitting: the window that shows it may be gone already
+            return
         try:
             self.on_status(dict(self.status))
         except Exception:
@@ -144,6 +146,9 @@ class IndexService:
             if self.paused or self._stop.is_set():
                 break
             store = Store(path)
+            again = store.read_again(CUT_SHORT)
+            if again:
+                log.info("reading %d files again that a quit cut short", again)
             if paths.ffmpeg_ready():
                 again = store.read_again(X.FFMPEG_MISSING)
                 if again:

@@ -1482,7 +1482,14 @@ def main() -> int:
     if "--show" in sys.argv:
         QTimer.singleShot(300, app.panel.summon)
     log.info("started")
-    return qt.exec()
+    code = qt.exec()
+    # Leave at once. The indexing and search threads are daemons, but Python's exit waits for every thread pool's
+    # workers, and on the way shuts the idle pools down: a reader in a long video kept a quit lazyFinds (and its model
+    # on the GPU) alive for minutes, and the file being embedded failed for good when the model's pool went. Nothing
+    # is lost by leaving now: SQLite rolls back a write that didn't finish, and that file stays new.
+    log.info("quit")
+    logging.shutdown()
+    os._exit(code)
 
 
 if __name__ == "__main__":
