@@ -1,7 +1,7 @@
 """Packs dist/lazyFinds into packaging/Output/lazyFinds-<version>-app.7z (LZMA2) for the web installer, and prints the
 defines Inno Setup needs: its SHA-256 and its unpacked size.
 
-    uv run --no-sync python packaging/make_archive.py 0.1.6
+    uv run --no-sync python packaging/make_archive.py 0.1.7
 """
 
 from __future__ import annotations
