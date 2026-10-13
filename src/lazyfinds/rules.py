@@ -15,7 +15,7 @@ from pathlib import Path
 KINDS = {
     "image": {"jpg", "jpeg", "jfif", "png", "webp", "bmp", "gif", "tif", "tiff", "heic", "heif", "avif"},
     "pdf": {"pdf"},
-    "doc": {"txt", "md", "markdown", "rtf", "docx", "pptx", "odt", "html", "htm"},
+    "doc": {"txt", "md", "markdown", "rtf", "docx", "doc", "pptx", "ppt", "odt", "html", "htm"},
     "audio": {"mp3", "m4a", "wav", "flac", "ogg", "opus", "aac", "wma", "aiff", "amr"},
     "video": {"mp4", "mkv", "mov", "avi", "webm", "wmv", "m4v", "mpg", "mpeg", "3gp", "mts", "m2ts", "flv"},
 }

@@ -94,7 +94,7 @@ Only the folders you choose:
 | screenshots | by what they show, and by their words (Windows OCR; Tesseract for Bengali) |
 | PDFs | page by page; scans and slides by their picture and OCR'd words; Bengali text layers checked against OCR |
 | documents (txt, md, rtf, docx, odt, html) | in passages of ~300 tokens cut at sentence ends |
-| Word and PowerPoint (docx, pptx) | the text as above (slides one by one, with speaker notes); each picture inside by what it shows and its OCR'd words; alt text as words |
+| Word and PowerPoint (docx, pptx, and the 97-2003 doc, ppt) | the text as above (slides one by one, with speaker notes); each picture inside by what it shows and its OCR'd words; alt text as words |
 | sound (mp3, m4a, wav, flac, …) | in 20-second windows, 5 s overlap (the model hears at most 30 s at a time) |
 | video | one frame per shot (ffmpeg scene detection), and the soundtrack as above |
 | code (in code folders only) | in blocks cut at definitions; names split apart ("refreshAccessToken" → refresh access token) |

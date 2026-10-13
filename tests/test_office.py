@@ -1,5 +1,6 @@
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -125,6 +126,40 @@ def test_a_document_of_pictures_only_is_read(tmp_path):
     })
     reading = X.read_document(path)
     assert [p.part for p in reading.pieces] == ["inner_picture"]
+
+
+# Saved by Word and PowerPoint (Microsoft 365) as 97-2003 files
+OLD = Path(__file__).parent / "reference" / "office97"
+
+
+def test_old_word_file_text_fields_and_pictures():
+    reading = X.read_document(OLD / "garden.doc")
+    (passage,) = [p for p in reading.pieces if p.part == "passage"]
+    # Bengali makes Word store the text as UTF-16; the hyperlink's field code is left out, its text kept
+    assert passage.body == "Garden diary. টমেটোর চারা Read more here. A green fence with white stripes"
+    pictures = [p for p in reading.pieces if p.part == "inner_picture"]
+    # one in the line of text with no alt text, one floating with alt text
+    assert [(p.start, p.line) for p in pictures] == [(1, None), (2, "A green fence with white stripes")]
+    assert X.inner_picture(OLD / "garden.doc", 2).size == (420, 300)
+
+
+def test_old_powerpoint_slides_in_show_order_with_notes():
+    reading = X.read_document(OLD / "harvest.ppt")
+    slides = [(p.start, p.body) for p in reading.pieces if p.part == "slide"]
+    # the picture slide was moved first after the title slide was made
+    assert slides == [(1, "A green fence\nTalk about the fence"), (2, "Harvest report\nTomatoes and beans")]
+    (picture,) = [p for p in reading.pieces if p.part == "inner_picture"]
+    assert (picture.start, picture.stop, picture.line) == (1, 1, "A green fence")
+    assert X.inner_picture(OLD / "harvest.ppt", 1).size == (420, 300)
+
+
+def test_old_files_locked_or_damaged(tmp_path):
+    with pytest.raises(X.Skip, match="password"):
+        X.read_document(OLD / "locked.doc")
+    broken = tmp_path / "broken.doc"
+    broken.write_bytes((OLD / "garden.doc").read_bytes()[:3000])
+    with pytest.raises(X.Unreadable):
+        X.read_document(broken)
 
 
 def test_word_files_are_read_again_once(tmp_path):

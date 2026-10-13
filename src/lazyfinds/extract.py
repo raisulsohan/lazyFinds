@@ -16,6 +16,7 @@ import io
 import json
 import posixpath
 import re
+import struct
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from . import engine as E
+from . import office97 as O
 from . import ocr, paths
 from . import text as T
 
@@ -259,9 +261,10 @@ _ENDS = "</w:p></a:p>"
 
 @dataclass
 class InnerPicture:
-    member: str                   # the picture's file in the zip
+    member: str                   # the picture's file in the zip (or its key in an Office 97-2003 file)
     alt: str | None = None
     slide: int | None = None
+    data: bytes | None = None     # the picture itself, when it isn't in a zip
 
 
 def _relations(z: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:
@@ -368,17 +371,32 @@ def _unique(pictures: list[InnerPicture]) -> list[InnerPicture]:
     return list(seen.values())
 
 
-def _inner_pictures(z: zipfile.ZipFile, ext: str) -> list[InnerPicture]:
-    return _unique(_docx(z)[1] if ext == ".docx" else _pptx(z)[1])
+def _office97(path: Path) -> tuple[str, list[tuple[int, str]] | None, list[InnerPicture]]:
+    """The text, the slides (a presentation), and the pictures of a Word or PowerPoint 97-2003 file."""
+    try:
+        if path.suffix.lower() == ".doc":
+            text, found = O.doc(path.read_bytes())
+            slides = None
+        else:
+            slides, found = O.ppt(path.read_bytes())
+            text = "\n".join(t for _, t in slides)
+    except O.Locked as error:
+        raise Skip(str(error))
+    except (O.Damaged, KeyError, struct.error, IndexError, RecursionError) as error:
+        raise Unreadable(f"can't read the document ({type(error).__name__}: {error})")
+    pictures = [InnerPicture(p.key, _alt_text(p.alt) if p.alt else None, p.slide, p.data) for p in found]
+    if slides is None:   # where a picture stands isn't known: its alt text goes after the text
+        text = "\n".join([text] + list(dict.fromkeys(p.alt for p in pictures if p.alt)))
+    return text, slides, pictures
 
 
-def _read_inner(z: zipfile.ZipFile, pictures: list[InnerPicture]) -> list[Piece]:
+def _read_inner(pictures: list[InnerPicture], z: zipfile.ZipFile | None = None) -> list[Piece]:
     out: list[Piece] = []
     for number, p in enumerate(_unique(pictures), 1):
         if len(out) >= MAX_INNER_PICTURES:
             break
         try:
-            picture = open_picture(io.BytesIO(z.read(p.member)))
+            picture = open_picture(io.BytesIO(p.data if p.data is not None else z.read(p.member)))
         except (Unreadable, KeyError):
             continue
         if picture.width * picture.height < SMALLEST_PICTURE:   # icons, bullets, logos
@@ -396,8 +414,11 @@ def _read_inner(z: zipfile.ZipFile, pictures: list[InnerPicture]) -> list[Piece]
 
 def inner_picture(path: Path, number: int) -> Image.Image:
     """Picture `number` of a Word or PowerPoint file, as its inner_picture piece counts them."""
+    ext = path.suffix.lower()
+    if ext in (".doc", ".ppt"):
+        return open_picture(io.BytesIO(_unique(_office97(path)[2])[number - 1].data))
     with zipfile.ZipFile(path) as z:
-        pictures = _inner_pictures(z, path.suffix.lower())
+        pictures = _unique(_docx(z)[1] if ext == ".docx" else _pptx(z)[1])
         return open_picture(io.BytesIO(z.read(pictures[number - 1].member)))
 
 
@@ -456,7 +477,10 @@ def read_document(path: Path) -> Reading:
                 else:
                     slides, inner = _pptx(z)
                     text = "\n".join(t for _, t in slides)
-                pictures = _read_inner(z, inner)
+                pictures = _read_inner(inner, z)
+        elif ext in (".doc", ".ppt"):
+            text, slides, inner = _office97(path)
+            pictures = _read_inner(inner)
         elif ext == ".odt":
             text = odt_text(path)
         elif ext == ".rtf":
