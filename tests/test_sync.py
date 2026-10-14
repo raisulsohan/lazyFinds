@@ -91,6 +91,7 @@ class StoppingEngine:
     """Embeds the first file; for the next one, the indexing is stopped and the pool is gone, as when the app quits."""
 
     alive = True
+    outdated = False
 
     def __init__(self, state):
         self.state = state

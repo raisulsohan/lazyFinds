@@ -1068,6 +1068,8 @@ class SettingsWindow(QWidget):
         value = self.backend.currentData()
         self._save(lambda s: setattr(s, "backend", value))
         E.FAILED.clear()         # a new choice gets a new try, the GPU too
+        if E.FETCH == "failed":
+            E.FETCH = ""         # and the Vulkan download, if it failed
         self.app.query.close()   # the next search starts the model on the new choice
         self._show_backend()
 
@@ -1078,9 +1080,11 @@ class SettingsWindow(QWidget):
         names = {"cuda": "CUDA", "vulkan": "Vulkan", "cpu": "the processor"}
         missing = self.backend.currentData() in ("cuda", "vulkan") and not paths.backend_ready(
             self.backend.currentData())
+        fetch = {"downloading": "; downloading the Vulkan build, 33 MB…",
+                 "failed": "; the Vulkan build didn't download"}.get(E.FETCH, "")
         note = (" (that one isn't downloaded)" if missing else
-                f" ({' and '.join(names[b] for b in sorted(E.FAILED))} wouldn't start; see the logs)" if E.FAILED
-                else "")
+                f" ({' and '.join(names[b] for b in sorted(E.FAILED))} wouldn't start{fetch}; see the logs)"
+                if E.FAILED else "")
         self.backend_state.setText(f"runs on {names[chosen]}" + note)
 
     # -- helper programs (ffmpeg, Tesseract): installed with winget, noticed without a restart

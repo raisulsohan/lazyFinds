@@ -170,6 +170,35 @@ def choose_backend(preferred: str | None = None) -> str:
     return backends(preferred)[0]
 
 
+FETCH = ""   # the Vulkan build fetched after CUDA failed: "", "downloading", "ready" or "failed"
+_fetch_lock = threading.Lock()
+
+
+def _fetch_vulkan() -> None:
+    """CUDA wouldn't start on this NVIDIA PC, which has only the CUDA build: get the Vulkan one (33 MB) in the background,
+    once a run. It runs on cards and drivers the CUDA 13 build doesn't (GeForce 900 and 10 series, older drivers), far
+    faster than the processor. An engine on the processor moves to it when it's in place (`Engine.outdated`)."""
+    global FETCH
+    with _fetch_lock:
+        if FETCH:
+            return
+        FETCH = "downloading"
+
+    def work():
+        global FETCH
+        from . import setup
+
+        try:
+            setup.run(only=[paths.LLAMA_VULKAN])
+            FETCH = "ready"
+            logger.info("model: the Vulkan build is ready")
+        except Exception as error:
+            FETCH = "failed"
+            logger.warning("model: couldn't get the Vulkan build: %s", error)
+
+    threading.Thread(target=work, name="fetch-vulkan", daemon=True).start()
+
+
 _STAMP = re.compile(r"^\d+\.\d+\.\d+\.\d+ ([IWED]) ")
 
 
@@ -203,6 +232,7 @@ class Engine:
         self._process: subprocess.Popen | None = None
         self._pool = ThreadPoolExecutor(SLOTS, thread_name_prefix="embed")
         self._log_path = log or (paths.log_dir() / ("server-text.log" if text_only else "server.log"))
+        self._asked = backend
         for self.backend in backends(backend):
             self.port = _free_port()
             self.key = secrets.token_urlsafe(24)
@@ -217,6 +247,8 @@ class Engine:
                     raise EngineError(str(error)) from error
                 FAILED.add(self.backend)
                 logger.warning("model: %s didn't start, trying the next backend (%s)", self.backend, error)
+                if self.backend == "cuda" and not paths.backend_ready("vulkan"):
+                    _fetch_vulkan()
 
     # -- process
 
@@ -311,6 +343,12 @@ class Engine:
     @property
     def alive(self) -> bool:
         return self._process is not None and self._process.poll() is None
+
+    @property
+    def outdated(self) -> bool:
+        """This engine runs on the processor, but a GPU is ready now (the Vulkan build, fetched after CUDA failed):
+        its owner should start a new one between inputs."""
+        return self.backend == "cpu" and choose_backend(self._asked) != "cpu"
 
     # -- HTTP (one keep-alive connection per thread)
 

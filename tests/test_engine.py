@@ -14,6 +14,7 @@ def nvidia_pc(monkeypatch):
     monkeypatch.setattr(paths, "backend_ready", lambda b: True)
     monkeypatch.setattr(paths, "models_ready", lambda: True)
     monkeypatch.setattr(E, "FAILED", set())
+    monkeypatch.setattr(E, "FETCH", "")
 
 
 def test_order(nvidia_pc, monkeypatch):
@@ -60,6 +61,75 @@ def test_processor_failing_is_the_error(nvidia_pc, monkeypatch, tmp_path):
     starts_only_on(monkeypatch, set())
     with pytest.raises(E.EngineError, match="on cpu"):
         E.Engine(text_only=True, log=tmp_path / "server.log", backend="auto")
+
+
+def test_cuda_failing_fetches_vulkan_and_the_processor_moves_to_it(nvidia_pc, monkeypatch, tmp_path):
+    vulkan = {"ready": False}
+    monkeypatch.setattr(paths, "backend_ready", lambda b: b == "cuda" or vulkan["ready"])
+    fetched = []
+    monkeypatch.setattr(E, "_fetch_vulkan", lambda: fetched.append(True))
+    starts_only_on(monkeypatch, {"vulkan", "cpu"})
+    engine = E.Engine(text_only=True, log=tmp_path / "server.log", backend="auto")
+    assert (engine.backend, fetched, engine.outdated) == ("cpu", [True], False)
+    vulkan["ready"] = True   # the download is in place
+    assert engine.outdated
+    engine.close()
+    with E.Engine(text_only=True, log=tmp_path / "server.log", backend="auto") as engine:
+        assert (engine.backend, engine.outdated) == ("vulkan", False)
+
+
+def test_no_fetch_when_vulkan_is_there(nvidia_pc, monkeypatch, tmp_path):
+    fetched = []
+    monkeypatch.setattr(E, "_fetch_vulkan", lambda: fetched.append(True))
+    starts_only_on(monkeypatch, {"cpu"})
+    E.Engine(text_only=True, log=tmp_path / "server.log", backend="auto").close()
+    assert fetched == []   # Vulkan was there and failed too: the processor it is
+
+
+def test_vulkan_is_fetched_once_a_run(monkeypatch):
+    import threading
+
+    from lazyfinds import setup
+
+    monkeypatch.setattr(E, "FETCH", "")
+    calls = []
+    monkeypatch.setattr(setup, "run", lambda only: calls.append([i.name for i in only]))
+    for _ in range(2):
+        E._fetch_vulkan()
+        for thread in threading.enumerate():
+            if thread.name == "fetch-vulkan":
+                thread.join(5)
+    assert (calls, E.FETCH) == ([[paths.LLAMA_VULKAN.name]], "ready")
+
+
+def test_a_build_appears_whole(monkeypatch, tmp_path):
+    """The Vulkan build is unpacked beside its folder and renamed into place; a second archive for a folder (CUDA's
+    runtime libraries) adds its files to it."""
+    import hashlib
+    import zipfile
+
+    from lazyfinds import setup
+
+    monkeypatch.setenv("LAZYFINDS_HOME", str(tmp_path / "home"))
+
+    def archive(name: str, files: list[str]) -> paths.Pinned:
+        path = tmp_path / name
+        with zipfile.ZipFile(path, "w") as z:
+            for f in files:
+                z.writestr(f, f"contents of {f}")
+        data = path.read_bytes()
+        return paths.Pinned(name, path.as_uri(), len(data), hashlib.sha256(data).hexdigest(), "runtime/vulkan")
+
+    build = archive("build.zip", ["llama-server.exe", "ggml-vulkan.dll", "llama.dll"])
+    extra = archive("extra.zip", ["cudart.dll"])
+    setup.run(only=[build])
+    folder = tmp_path / "home" / "runtime" / "vulkan"
+    assert sorted(p.name for p in folder.iterdir()) == [".build.zip.ok", "ggml-vulkan.dll", "llama-server.exe",
+                                                         "llama.dll"]
+    assert paths.backend_ready("vulkan") and not (tmp_path / "home" / "runtime" / "vulkan.part").exists()
+    setup.run(only=[extra])
+    assert {".extra.zip.ok", "cudart.dll", "llama.dll"} <= {p.name for p in folder.iterdir()}
+    assert not (tmp_path / "home" / "downloads").exists()
 
 
 def test_reason_is_the_last_error_of_this_start(tmp_path):

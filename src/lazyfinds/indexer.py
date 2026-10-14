@@ -137,6 +137,8 @@ class Indexer:
         return changes
 
     def engine(self) -> E.Engine:
+        if self._engine is not None and self._engine.outdated:
+            self._engine.close()   # a GPU became ready while this one ran on the processor
         if self._engine is None or not self._engine.alive:
             self._engine = E.Engine(backend=self.backend)
         return self._engine
@@ -149,7 +151,7 @@ class Indexer:
         progress = Progress(total=len(jobs))
         if not jobs:
             return progress
-        engine = self.engine()
+        self.engine()
         with ThreadPoolExecutor(self.readers, thread_name_prefix="read") as pool:
             queue = list(jobs)
             ahead: list[tuple[tuple, Future]] = []
@@ -161,7 +163,7 @@ class Indexer:
                     break
                 (file_id, path, kind), future = ahead.pop(0)
                 try:
-                    status, note = self._write(engine, file_id, future.result())
+                    status, note = self._write(self.engine(), file_id, future.result())
                 except E.EngineError:
                     raise
                 except Exception as error:   # one odd file mustn't stop the rest

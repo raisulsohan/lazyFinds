@@ -221,6 +221,9 @@ class QueryService:
     def _get_engine(self) -> E.Engine | None:
         with self._engine_lock:
             self._used = time.monotonic()
+            if self._engine is not None and self._engine.outdated:
+                self._engine.close()   # a GPU became ready while this one ran on the processor
+                self._engine = None
             if self._engine is None or not self._engine.alive:
                 try:
                     self._engine = E.Engine(text_only=True)

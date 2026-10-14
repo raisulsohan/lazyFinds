@@ -1,13 +1,15 @@
 """The one-time downloads, each checked against the checksum its publisher lists (paths.py).
 
 The model always; one llama.cpp build: CUDA on a PC with an NVIDIA driver, Vulkan on any other (both run on the
-processor too); and, when asked for, Tesseract's Bengali and English models. Downloads resume (HTTP range) under a
+processor too), and Vulkan as well when CUDA won't start there (engine.py fetches it); and, when asked for, Tesseract's
+Bengali and English models. Downloads resume (HTTP range) under a
 temporary name; only a verified file gets its final name.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import urllib.request
 import zipfile
@@ -77,9 +79,19 @@ def run(progress: Callable[[str, int, int], None] = lambda n, a, b: None, backen
         if not archive.exists():
             _download(item, archive, progress)
         target = paths.app_dir() / item.unpack_to
-        target.mkdir(parents=True, exist_ok=True)
+        staging = target.with_name(target.name + ".part")
+        shutil.rmtree(staging, ignore_errors=True)
         with zipfile.ZipFile(archive) as z:
-            z.extractall(target)
-        _done_marker(item).write_text(item.sha256)
+            z.extractall(staging)
+        (staging / _done_marker(item).name).write_text(item.sha256)
+        if target.exists():
+            # A second archive for the same folder (CUDA's runtime libraries): add its files.
+            for entry in staging.iterdir():
+                os.replace(entry, target / entry.name)
+            staging.rmdir()
+        else:
+            # The whole build at once: a lazyFinds running meanwhile never starts half of one.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging.replace(target)
         archive.unlink()
     shutil.rmtree(downloads, ignore_errors=True)

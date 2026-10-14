@@ -58,7 +58,8 @@ uv run lazyfinds-app
 ```
 
 The first start downloads the model and one llama.cpp build once (CUDA on an NVIDIA PC: 1.4 GB; Vulkan elsewhere:
-0.9 GB). Every file is checked against the SHA-256 its publisher lists. Then pick folders in Settings; lazyFinds reads
+0.9 GB). If CUDA won't start on an NVIDIA PC (an older card or driver), lazyFinds runs on the processor and gets the
+Vulkan build too (33 MB), then moves to it. Every file is checked against the SHA-256 its publisher lists. Then pick folders in Settings; lazyFinds reads
 them in the background and lives in the system tray.
 
 Press **Ctrl+Alt+Space** (change it in Settings) in any app and describe what you're looking for.
