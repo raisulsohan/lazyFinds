@@ -20,7 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QMimeData, QObject, QPoint, QSize, Qt, QTimer, QUrl,
+                            Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -1318,6 +1319,31 @@ class SetupDialog(QDialog):
 
 # -- the app
 
+WM_CLOSE, WM_SYSCOMMAND, SC_CLOSE = 0x0010, 0x0112, 0xF060
+
+
+class CloseRequests(QAbstractNativeEventFilter):
+    """Quits lazyFinds, as the tray menu does, when Windows asks it to close. taskkill without /f and Task Manager post
+    WM_CLOSE to one top-level window they pick, often a hidden one of Qt's own that ignores it; and no window of a
+    tray app means "quit" when it closes. The user closing a window (Alt+F4, its X) sends WM_SYSCOMMAND/SC_CLOSE
+    first, which then turns into WM_CLOSE: that one still only closes the window."""
+
+    def __init__(self, on_close):
+        super().__init__()
+        self.on_close = on_close
+        self._user_closed = 0.0
+
+    def nativeEventFilter(self, event_type, message):
+        if event_type == b"windows_generic_MSG":
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == WM_SYSCOMMAND and msg.wParam & 0xFFF0 == SC_CLOSE:
+                self._user_closed = time.monotonic()
+            elif msg.message == WM_CLOSE and time.monotonic() - self._user_closed > 1:
+                log.info("asked to close")
+                QTimer.singleShot(0, self.on_close)
+                return True, 0
+        return False, 0
+
 
 class LazyFindsApp(QObject):
     def __init__(self, qt: QApplication):
@@ -1336,6 +1362,9 @@ class LazyFindsApp(QObject):
         self.panel = SearchPanel(self)
         self.preview = Preview(self)
         self.settings_window: SettingsWindow | None = None
+        self.close_requests = CloseRequests(self.quit)
+        qt.installNativeEventFilter(self.close_requests)
+        qt.aboutToQuit.connect(self._leaving)
         self.bridge.results.connect(self.panel.show_results)
         self.bridge.status.connect(self._status)
         self.bridge.thumb.connect(self.panel.set_thumb)
@@ -1452,11 +1481,15 @@ class LazyFindsApp(QObject):
         self.thumb_pool.submit(work)
 
     def quit(self):
+        self.qt.quit()
+
+    def _leaving(self):
+        """Every way out ends here: the tray menu, a close request, and a session that ends (an installer through the
+        Restart Manager, signing out), for which Qt sends aboutToQuit without a quit() of ours."""
         self.indexing.stop()
         self.names.stop()
         self.query.close()
         self.tray.hide()
-        self.qt.quit()
 
 
 def setup_logging():
@@ -1505,6 +1538,9 @@ def main() -> int:
     # is lost by leaving now: SQLite rolls back a write that didn't finish, and that file stays new.
     log.info("quit")
     logging.shutdown()
+    # TerminateProcess, not only os._exit: that still runs each DLL's unload code, and PySide's, with the QApplication
+    # still alive, crashed on almost every quit (0xC0000005 in pyside6.abi3.dll; Windows logged each one).
+    ctypes.windll.kernel32.TerminateProcess(wintypes.HANDLE(-1), code)   # -1: this process
     os._exit(code)
 
 
