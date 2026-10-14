@@ -14,8 +14,10 @@ import ctypes
 import http.client
 import io
 import json
+import logging
 import math
 import os
+import re
 import secrets
 import socket
 import struct
@@ -30,6 +32,8 @@ import numpy as np
 from PIL import Image
 
 from . import paths
+
+logger = logging.getLogger("lazyfinds")
 
 DIM = 768
 BUDGETS = (70, 140, 280, 560, 1120)
@@ -144,18 +148,44 @@ def _free_port() -> int:
 
 
 BACKENDS = ("cuda", "vulkan", "cpu")
+FAILED: set[str] = set()   # GPU backends that wouldn't start in this run; Settings clears it when the choice changes
+
+
+def backends(preferred: str | None = None) -> list[str]:
+    """The backends to try, best first: the one asked for (settings: "auto", "cuda", "vulkan", "cpu") when it's there,
+    else CUDA on an NVIDIA PC, Vulkan on any other GPU. The processor is always last, so search still works when the GPU
+    won't start: a driver too old for the CUDA 13 build, a card it has no kernels for, no Vulkan driver at all."""
+    if preferred == "cpu":
+        return ["cpu"]
+    gpus = [preferred] if preferred in BACKENDS and paths.backend_ready(preferred) else []
+    if paths.has_nvidia() and paths.backend_ready("cuda"):
+        gpus.append("cuda")
+    if paths.backend_ready("vulkan"):
+        gpus.append("vulkan")
+    return [b for b in dict.fromkeys(gpus) if b not in FAILED] + ["cpu"]
 
 
 def choose_backend(preferred: str | None = None) -> str:
-    """The backend to run on: the one asked for (settings: "auto", "cuda", "vulkan", "cpu") when it's there, else CUDA on
-    an NVIDIA PC, Vulkan on any other GPU, the CPU last."""
-    if preferred in BACKENDS and paths.backend_ready(preferred):
-        return preferred
-    if paths.has_nvidia() and paths.backend_ready("cuda"):
-        return "cuda"
-    if paths.backend_ready("vulkan"):
-        return "vulkan"
-    return "cpu"
+    """The backend the next engine starts on."""
+    return backends(preferred)[0]
+
+
+_STAMP = re.compile(r"^\d+\.\d+\.\d+\.\d+ ([IWED]) ")
+
+
+def _reason(log: Path, since: int) -> str:
+    """The server's last error line in its log after `since`, without the timestamp ("" when it wrote none)."""
+    try:
+        with open(log, "rb") as f:
+            f.seek(since)
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        stamp = _STAMP.match(line)
+        if (stamp.group(1) == "E") if stamp else "error" in line.lower():
+            return line[stamp.end() if stamp else 0:].strip()
+    return ""
 
 
 class Engine:
@@ -167,21 +197,30 @@ class Engine:
             from .settings import Settings
 
             backend = Settings.load().backend
-        self.backend = choose_backend(backend)
-        self.port = _free_port()
-        self.key = secrets.token_urlsafe(24)
+        if not paths.models_ready():
+            raise EngineError("the model isn't downloaded yet: run `lazyfinds setup`")
         self.marker = ""
         self._process: subprocess.Popen | None = None
-        self._local = threading.local()
         self._pool = ThreadPoolExecutor(SLOTS, thread_name_prefix="embed")
         self._log_path = log or (paths.log_dir() / ("server-text.log" if text_only else "server.log"))
-        self._start()
+        for self.backend in backends(backend):
+            self.port = _free_port()
+            self.key = secrets.token_urlsafe(24)
+            self._local = threading.local()
+            try:
+                self._start()
+                return
+            except Exception as error:
+                self._stop()
+                if self.backend == "cpu":
+                    self._pool.shutdown(wait=False)
+                    raise EngineError(str(error)) from error
+                FAILED.add(self.backend)
+                logger.warning("model: %s didn't start, trying the next backend (%s)", self.backend, error)
 
     # -- process
 
     def _start(self) -> None:
-        if not paths.models_ready():
-            raise EngineError("the model isn't downloaded yet: run `lazyfinds setup`")
         models = paths.models_dir()
         exe = paths.server_exe(self.backend)
         gpu = self.backend != "cpu"
@@ -205,16 +244,22 @@ class Engine:
             args += ["--no-mmproj"]
         args += os.environ.get("LAZYFINDS_SERVER_ARGS", "").split()   # dev experiments only
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = open(self._log_path, "ab")
-        self._process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        out = open(self._log_path, "ab")
+        since = out.tell()
+        self._process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                          cwd=str(exe.parent), creationflags=subprocess.CREATE_NO_WINDOW)
-        log.close()
+        out.close()
         _kill_with_us(self._process.pid)
+
+        def stopped(when: str) -> EngineError:
+            why = _reason(self._log_path, since) or f"see {self._log_path}"
+            code = self._process.returncode
+            return EngineError(f"llama-server on {self.backend} stopped {when} (exit {code}): {why}")
+
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
-                raise EngineError(f"llama-server stopped while loading (exit {self._process.returncode}); "
-                                  f"see {self._log_path}")
+                raise stopped("while loading")
             try:
                 status, body = self._request("GET", "/health", None, timeout=2)
                 if status == 200:
@@ -223,11 +268,17 @@ class Engine:
                 pass
             time.sleep(0.25)
         else:
-            self.close()
-            raise EngineError("llama-server didn't start in 3 minutes")
-        _, props = self._request("GET", "/props", None)
-        self.marker = props.get("media_marker", "<__media__>")
-        self._warm_up()
+            raise EngineError(f"llama-server on {self.backend} didn't start in 3 minutes")
+        try:
+            _, props = self._request("GET", "/props", None)
+            self.marker = props.get("media_marker", "<__media__>")
+            self._warm_up()
+        except Exception:
+            # A GPU it can't really use (no kernels for that card) often loads, then dies on its first input.
+            time.sleep(0.5)
+            if self._process.poll() is not None:
+                raise stopped("on its first input") from None
+            raise
 
     def _warm_up(self) -> None:
         """The first call of each kind builds the GPU's kernels (Vulkan compiles its shaders then: 32 passages took 12 s
@@ -240,6 +291,9 @@ class Engine:
 
     def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self._stop()
+
+    def _stop(self) -> None:
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:

@@ -34,6 +34,7 @@ def reference() -> dict:
 def made_vectors(backend: str | None) -> dict[str, np.ndarray]:
     made = {}
     with E.Engine(backend=backend) as engine:
+        assert backend is None or engine.backend == backend, f"{backend} didn't start; it ran on {engine.backend}"
         for name, v in zip(TEXTS, engine.embed_texts(list(TEXTS.values()))):
             made[name] = v
         for budget in (280, 140, 70):
