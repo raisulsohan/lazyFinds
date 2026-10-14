@@ -1,6 +1,6 @@
 [project]
 name = "lazyfinds"
-version = "0.1.10"
+version = "0.1.11"
 description = "Find files on Windows by what is in them: pictures, PDFs, documents, audio, video. On-device, offline."
 readme = "README.md"
 requires-python = ">=3.12"
