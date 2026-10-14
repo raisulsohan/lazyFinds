@@ -130,18 +130,24 @@ begin
     Archive := ExpandConstant('{tmp}\' + ArchiveFile);
     Target := ExpandConstant('{app}');
     ForceDirectories(Target);
-    if WizardSilent then
-      ExtractArchive(Archive, Target, '', True, nil)
-    else
-    begin
-      ExtractionPage.Clear;
-      ExtractionPage.Add(Archive, '', True);
-      ExtractionPage.Show;
-      try
-        ExtractionPage.Extract;
-      finally
-        ExtractionPage.Hide;
+    try
+      if WizardSilent then
+        ExtractArchive(Archive, Target, '', True, nil)
+      else
+      begin
+        ExtractionPage.Clear;
+        ExtractionPage.Add(Archive, Target, True);
+        ExtractionPage.Show;
+        try
+          ExtractionPage.Extract;
+        finally
+          ExtractionPage.Hide;
+        end;
       end;
+    except
+      SuppressibleMsgBox('lazyFinds couldn''t be unpacked: ' + GetExceptionMessage + #13#10#13#10 +
+                         'Run this setup again, or use the offline installer from the release page.',
+                         mbCriticalError, MB_OK, IDOK);
     end;
   end;
 end;
