@@ -2,13 +2,15 @@
 
 Ctrl+Shift+Space (changeable) opens the panel from any app. Type what you're looking for: words match at once, meaning
 follows a moment later. Enter opens the result where it matched, Space previews it, Ctrl+Enter shows it in File
-Explorer, Ctrl+C copies the file. Bengali typed in Latin letters is searched in Bengali too; a line under the field
-says so, and Ctrl+B searches that query as typed.
+Explorer, Ctrl+C copies the file; a right-click (or the Menu key) shows the file menu: Open with, Send to, Share,
+Rename, Delete and the rest of Explorer's own. Bengali typed in Latin letters is searched in Bengali too; a line under
+the field says so, and Ctrl+B searches that query as typed.
 """
 
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import html
 import logging
 import logging.handlers
@@ -20,18 +22,19 @@ from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QMimeData, QObject, QPoint, QSize, Qt, QTimer, QUrl,
-                            Signal)
+from PySide6.QtCore import (QAbstractNativeEventFilter, QEvent, QFileInfo, QMimeData, QObject, QPoint, QSize, Qt,
+                            QTimer, QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QCursor, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton,
-                               QSizePolicy, QSlider, QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFrame,
+                               QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+                               QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSystemTrayIcon,
+                               QTextBrowser, QVBoxLayout, QWidget)
 
 from . import banglish as B
 from . import code as C
-from . import extract, opener, paths, rules
+from . import extract, opener, paths, rules, shell
 from . import text as T
 from .search import Hit, strong_count
 from .service import IndexService, QueryService, code_index_path, index_path
@@ -187,9 +190,6 @@ class NameRow(QWidget):
 
     def __init__(self, hit: Hit):
         super().__init__()
-        from PySide6.QtCore import QFileInfo
-        from PySide6.QtWidgets import QFileIconProvider
-
         if NameRow.icons is None:
             NameRow.icons = (QFileIconProvider(), {})
         provider, cache = NameRow.icons
@@ -336,6 +336,8 @@ class SearchPanel(QWidget):
         self.list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.list.itemDoubleClicked.connect(lambda item: self.open_current())
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._menu_at)
         box.addWidget(self.list, 1)
         self.footer = QLabel()
         self.footer.setObjectName("footer")
@@ -348,6 +350,7 @@ class SearchPanel(QWidget):
         self.debounce.timeout.connect(self._submit)
         self.hotkey_id = 1
         self.hotkey_ok = False
+        self.holding = False   # a Windows window of the file menu is up: the panel stays while it is
         self.set_mode(Settings.load().search_mode, save=False)
 
     # hotkey
@@ -395,6 +398,8 @@ class SearchPanel(QWidget):
         return super().event(e)
 
     def _maybe_hide(self):
+        if self.holding:
+            return
         active = QApplication.activeWindow()
         if active is None or active is self:
             if not self.isActiveWindow():
@@ -627,6 +632,9 @@ class SearchPanel(QWidget):
             if ctrl and key == Qt.Key.Key_Comma:
                 self.app.show_settings()
                 return True
+            if key == Qt.Key.Key_Menu or (key == Qt.Key.Key_F10 and mods & Qt.KeyboardModifier.ShiftModifier):
+                self.show_menu()
+                return True
         return super().eventFilter(obj, e)
 
     # actions
@@ -658,19 +666,184 @@ class SearchPanel(QWidget):
             self.hide()
             opener.reveal(hit.path)
 
-    def copy_current(self):
+    def copy_current(self, cut: bool = False):
         hit = self.current_hit()
         if hit:
             data = QMimeData()
             data.setUrls([QUrl.fromLocalFile(hit.path)])
             data.setText(hit.path)
+            if cut:   # what Explorer's Cut puts beside the file: paste moves it
+                data.setData('application/x-qt-windows-mime;value="Preferred DropEffect"', (2).to_bytes(4, "little"))
             QGuiApplication.clipboard().setMimeData(data)
-            self.footer.setText(f"Copied {Path(hit.path).name}. Paste it anywhere.")
+            self.footer.setText(f"{'Cut' if cut else 'Copied'} {Path(hit.path).name}. Paste it in a folder.")
+
+    def copy_text(self, text: str, what: str):
+        QGuiApplication.clipboard().setText(text)
+        self.footer.setText(f"Copied {what}: {text}")
 
     def preview_current(self):
         hit = self.current_hit()
         if hit and (hit.part != "name" or hit.kind in ("image", "screenshot", "pdf", "audio", "video")):
             self.app.preview.show_hit(hit, autoplay=hit.kind in ("audio", "video"))
+
+    # the file menu (right-click, the Menu key or Shift+F10): Explorer's own items, as File Explorer has them
+
+    def _menu_at(self, pos: QPoint):
+        item = self.list.itemAt(pos)
+        if item and item.data(Qt.ItemDataRole.UserRole):
+            self.list.setCurrentItem(item)
+            self.show_menu(self.list.viewport().mapToGlobal(pos))
+
+    def show_menu(self, where: QPoint | None = None):
+        hit = self.current_hit()
+        if not hit:
+            return
+        if where is None:
+            rect = self.list.visualItemRect(self.list.currentItem())
+            where = self.list.viewport().mapToGlobal(QPoint(rect.left() + 40, rect.center().y()))
+        path, name = hit.path, Path(hit.path).name
+        menu = QMenu(self)
+        first = menu.addAction("Open\tEnter", self.open_current)
+        font = first.font()
+        font.setBold(True)
+        first.setFont(font)
+        menu.addAction("Open Path\tCtrl+Enter", self.reveal_current)
+        menu.addAction("Copy Full Name to Clipboard", lambda: self.copy_text(path, "the full name"))
+        menu.addSeparator()
+        apps: list[shell.App] = []
+        if hit.kind != "folder":
+            with_menu = menu.addMenu("Open with")
+            with_menu.aboutToShow.connect(lambda: self._fill_open_with(with_menu, path, apps))
+        menu.addAction("Copy as path", lambda: self.copy_text(f'"{path}"', "the path"))
+        menu.addAction("Share", lambda: self._shell("Share", lambda: shell.invoke(
+            path, "Windows.ModernShare", int(self.winId()), (where.x(), where.y()))))
+        menu.addSeparator()
+        send_menu = menu.addMenu("Send to")
+        send_menu.aboutToShow.connect(lambda: self._fill_send_to(send_menu, path))
+        menu.addSeparator()
+        menu.addAction("Cut", lambda: self.copy_current(cut=True))
+        menu.addAction("Copy\tCtrl+C", self.copy_current)
+        menu.addSeparator()
+        menu.addAction("Create shortcut", lambda: self._shortcut(path))
+        menu.addAction("Delete", lambda: self._delete(hit))
+        menu.addAction("Rename", lambda: self._rename(hit))
+        menu.addSeparator()
+        menu.addAction("Properties", lambda: self._shell("Properties", lambda: (self.hide(), shell.properties(path))))
+        if not os.path.exists(path):
+            for action in menu.actions():
+                action.setEnabled(action.text().startswith(("Copy Full", "Copy as")))
+            self.footer.setText(f"{name} isn't there any more. It leaves the index on the next pass.")
+        menu.exec(where)
+        for app in apps:
+            app.close()
+
+    def _fill_open_with(self, menu: QMenu, path: str, apps: list):
+        if not menu.isEmpty():
+            return
+        apps.extend(shell.open_with_apps(Path(path).suffix.lower() or "."))
+        icons = QFileIconProvider()
+        for app in apps:
+            icon = QIcon(app.icon) if app.icon.lower().endswith(".png") else (
+                icons.icon(QFileInfo(app.icon)) if app.icon else QIcon())
+            menu.addAction(icon, app.name, lambda a=app: self._shell("Open with", lambda: (self.hide(), a.open(path))))
+        if apps:
+            menu.addSeparator()
+        menu.addAction("Choose another app", lambda: self._shell("Open with", lambda: (
+            self.hide(), shell.choose_app(path))))
+
+    def _fill_send_to(self, menu: QMenu, path: str):
+        if not menu.isEmpty():
+            return
+        icons = QFileIconProvider()
+        for target in shell.send_to_targets():
+            try:
+                label = shell.display_name(target)
+            except OSError:
+                label = Path(target).stem or target
+            menu.addAction(icons.icon(QFileInfo(target)), label, lambda t=target, n=label: self._shell(
+                "Send to", lambda: (shell.send_to(t, path), self.footer.setText(f"Sent {Path(path).name} to {n}."))))
+
+    def _shell(self, what: str, action):
+        """Runs a Windows part of the menu; the panel stays up while a window of it asks something."""
+        self.holding = True
+        try:
+            action()
+        except OSError as error:
+            if error.winerror not in (1223, -2147023673):   # ERROR_CANCELLED: you said no
+                log.warning("%s: %s", what, error)
+                self.footer.setText(f"{what} didn't work: {error.strerror or error}")
+        finally:
+            self.holding = False
+
+    def _shortcut(self, path: str):
+        before = set(os.listdir(os.path.dirname(path)))
+        self._shell("Create shortcut", lambda: shell.invoke(path, "link", int(self.winId())))
+        made = set(os.listdir(os.path.dirname(path))) - before
+        if made:
+            self.footer.setText(f"Made {made.pop()} beside it.")
+
+    def _delete(self, hit: Hit):
+        self._shell("Delete", lambda: shell.invoke(hit.path, "delete", int(self.winId())))
+        if not os.path.exists(hit.path):
+            self._replace(hit.path, None)
+            self.footer.setText(f"Moved {Path(hit.path).name} to the Recycle Bin.")
+
+    def _rename(self, hit: Hit):
+        old = Path(hit.path)
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Rename")
+        dialog.setLabelText(f"New name for {old.name}:")
+        dialog.setTextValue(old.name)
+        dialog.resize(420, dialog.height())
+        # As in Explorer, the name is selected without its extension.
+        stem = len(old.stem) if old.suffix and hit.kind != "folder" else len(old.name)
+        QTimer.singleShot(0, lambda: (edit := dialog.findChild(QLineEdit)) and edit.setSelection(0, stem))
+        self.holding = True
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+        finally:
+            self.holding = False
+        name = dialog.textValue().strip().rstrip(".")
+        if not name or name == old.name:
+            return
+        if any(c in name for c in '\\/:*?"<>|'):
+            QMessageBox.warning(self, APP_NAME, 'A file name can\'t contain any of these characters:\n\\ / : * ? " < > |')
+            return
+        new = old.with_name(name)
+        try:
+            if new.exists() and name.lower() != old.name.lower():
+                raise FileExistsError(f"There is already a {name} in this folder.")
+            old.rename(new)
+        except OSError as error:
+            QMessageBox.warning(self, APP_NAME, f"Can't rename {old.name}:\n{error.strerror or error}")
+            return
+        self._replace(hit.path, str(new))
+        self.footer.setText(f"Renamed to {name}.")
+
+    def _replace(self, path: str, new_path: str | None):
+        """Shows a renamed file under its new name, or takes a deleted one off the list."""
+        for i in reversed(range(self.list.count())):
+            item = self.list.item(i)
+            hit = item.data(Qt.ItemDataRole.UserRole)
+            if not hit or hit.path != path:
+                continue
+            if new_path is None:
+                self.list.takeItem(i)
+                continue
+            new = dataclasses.replace(hit, path=new_path)
+            item.setData(Qt.ItemDataRole.UserRole, new)
+            row = NameRow(new) if new.part == "name" else ResultRow(new)
+            self.list.setItemWidget(item, row)
+            if isinstance(row, ResultRow):
+                old_key, key = self._thumb_key(hit), self._thumb_key(new)
+                if old_key in self.thumbs:
+                    self.thumbs[key] = self.thumbs[old_key]
+                self.rows.setdefault(key, []).append(row)
+                if key in self.thumbs:
+                    row.set_thumb(self.thumbs[key])
+        if new_path is None and self.list.count():
+            self._select(min(max(self.list.currentRow(), 0), self.list.count() - 1))
 
 
 # -- preview (Space): the picture, the PDF page, the passage, or the recording at its moment
@@ -1317,6 +1490,77 @@ class SetupDialog(QDialog):
             self.accept()
 
 
+# -- about
+
+
+SITE = "https://raisulsohan.com"
+
+
+def app_version() -> str:
+    """From the exe in the installed app (packaging/version.txt), from pyproject.toml when run from source (the
+    package metadata there is only as new as the last `uv sync`)."""
+    if getattr(sys, "frozen", False):
+        size = ctypes.windll.version.GetFileVersionInfoSizeW(sys.executable, None)
+        data = ctypes.create_string_buffer(size)
+        fixed, length = ctypes.c_void_p(), wintypes.UINT()
+        if size and ctypes.windll.version.GetFileVersionInfoW(sys.executable, 0, size, data) and \
+                ctypes.windll.version.VerQueryValueW(data, "\\", ctypes.byref(fixed), ctypes.byref(length)):
+            ms, ls = ctypes.cast(fixed, ctypes.POINTER(wintypes.DWORD * 4)).contents[2:4]   # dwFileVersionMS, LS
+            return f"{ms >> 16}.{ms & 0xFFFF}.{ls >> 16}"
+        return ""
+    try:
+        import tomllib
+
+        with open(Path(__file__).parents[2] / "pyproject.toml", "rb") as f:
+            return tomllib.load(f)["project"]["version"]
+    except (OSError, KeyError, ValueError):
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("lazyfinds")
+        except PackageNotFoundError:
+            return ""
+
+
+class AboutWindow(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"About {APP_NAME}")
+        self.setWindowIcon(make_icon())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 18)
+        layout.setSpacing(16)
+        top = QHBoxLayout()
+        top.setSpacing(20)
+        logo = QLabel()
+        logo.setPixmap(make_icon(160).pixmap(80, 80))
+        top.addWidget(logo, 0, Qt.AlignmentFlag.AlignTop)
+        version = app_version()
+        text = QLabel(
+            f"<div style='font-size:22px; font-weight:600'>{APP_NAME}</div>"
+            f"<div style='color:gray'>{'Version ' + version if version else ''}</div>"
+            "<p>Search your PC by what's inside your files.<br>Everything runs on your PC: no account, no cloud, "
+            "no telemetry.</p>"
+            f"<p>Created by <b>Raisul Sohan</b><br><a href='{SITE}'>raisulsohan.com</a></p>"
+            f"<p><a href='{SITE}/en/portfolio/lazyfinds/'>lazyFinds page</a> &nbsp;·&nbsp; "
+            "<a href='https://github.com/raisulsohan/lazyFinds'>Source code on GitHub</a></p>"
+            "<p style='color:gray; font-size:11px'>MIT License, © 2026 Raisul Sohan.<br>Runs Google DeepMind's "
+            "EmbeddingGemma 2 (Apache 2.0) on llama.cpp.</p>")
+        text.setTextFormat(Qt.TextFormat.RichText)
+        text.setOpenExternalLinks(True)
+        text.setWordWrap(True)
+        text.setMinimumWidth(320)
+        top.addWidget(text, 1)
+        layout.addLayout(top)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.setDefault(True)
+        close.clicked.connect(self.close)
+        row.addWidget(close)
+        layout.addLayout(row)
+
+
 # -- the app
 
 WM_CLOSE, WM_SYSCOMMAND, SC_CLOSE = 0x0010, 0x0112, 0xF060
@@ -1362,6 +1606,7 @@ class LazyFindsApp(QObject):
         self.panel = SearchPanel(self)
         self.preview = Preview(self)
         self.settings_window: SettingsWindow | None = None
+        self.about_window: AboutWindow | None = None
         self.close_requests = CloseRequests(self.quit)
         qt.installNativeEventFilter(self.close_requests)
         qt.aboutToQuit.connect(self._leaving)
@@ -1380,9 +1625,11 @@ class LazyFindsApp(QObject):
         self.pause_action.triggered.connect(self._toggle_pause)
         settings_action = QAction("Settings…", menu)
         settings_action.triggered.connect(self.show_settings)
+        about_action = QAction("About lazyFinds", menu)
+        about_action.triggered.connect(self.show_about)
         quit_action = QAction("Quit lazyFinds", menu)
         quit_action.triggered.connect(self.quit)
-        for a in (self.search_action, self.status_action, self.pause_action, settings_action):
+        for a in (self.search_action, self.status_action, self.pause_action, settings_action, about_action):
             menu.addAction(a)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -1471,6 +1718,13 @@ class LazyFindsApp(QObject):
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
+    def show_about(self):
+        if self.about_window is None:
+            self.about_window = AboutWindow()
+        self.about_window.show()
+        self.about_window.raise_()
+        self.about_window.activateWindow()
 
     def load_thumb(self, key: str, hit: Hit):
         def work():
